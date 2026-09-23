@@ -47,8 +47,10 @@ def pyinstaller_args(onefile: bool, embed_ffmpeg: bool) -> list[str]:
         "--distpath", str(ROOT / "dist"),
         "--workpath", str(ROOT / "build"),
         "--specpath", str(ROOT / "build"),     # el .spec generado no ensucia la raíz
-        # Recursos propios, accesibles en tiempo de ejecución vía sys._MEIPASS/assets
-        "--add-data", f"{ROOT / 'assets'}{SEP}assets",
+        # Iconos de la ventana, accesibles en tiempo de ejecución vía sys._MEIPASS/assets
+        # (icon_source.png solo sirve para generarlos: no se empaqueta).
+        "--add-data", f"{ROOT / 'assets' / 'icon.ico'}{SEP}assets",
+        "--add-data", f"{ROOT / 'assets' / 'icon.png'}{SEP}assets",
         # Temas/fuentes JSON de CustomTkinter y scripts JS de yt-dlp-ejs
         "--collect-data", "customtkinter",
         "--collect-data", "yt_dlp_ejs",

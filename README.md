@@ -24,9 +24,9 @@ App musica/
 ├── build.py                       # Compilación con PyInstaller (Windows/Linux)
 ├── requirements.txt               # Dependencias de ejecución
 ├── requirements-dev.txt           # + PyInstaller y Pillow
-├── assets/                        # icon.ico (Windows) e icon.png (Linux)
+├── assets/                        # icon.ico (Windows), icon.png (Linux), icon_source.png (original)
 ├── bin/                           # (opcional) ffmpeg + ffprobe portables
-├── packaging/make_icon.py         # Regenera los iconos
+├── packaging/make_icon.py         # Genera icon.ico / icon.png desde icon_source.png
 ├── scripts/
 │   ├── install_shortcuts_windows.ps1   # Crea los .lnk (Escritorio + Menú Inicio)
 │   ├── install_shortcuts_windows.bat   # Lo mismo, con doble clic
@@ -190,13 +190,13 @@ más nueva** que la de la máquina donde se compiló. Por eso la CI compila en U
 que allí lo aporta el `.desktop`):
 
 ```bash
-pyinstaller main.py --name MediaDownloader --onedir --windowed --noconfirm --clean --add-data "assets;assets" --collect-data customtkinter --collect-data yt_dlp_ejs --icon assets/icon.ico
+pyinstaller main.py --name MediaDownloader --onedir --windowed --noconfirm --clean --add-data "assets/icon.ico;assets" --add-data "assets/icon.png;assets" --collect-data customtkinter --collect-data yt_dlp_ejs --icon assets/icon.ico
 ```
 
 - `--windowed` (equivale a `--noconsole` / `-w`): no aparece la consola de fondo. En este modo
   `sys.stdout`/`sys.stderr` son `None`, así que la app registra en un archivo y muestra los
   errores fatales en un diálogo.
-- `--add-data assets`: iconos accesibles en tiempo de ejecución.
+- `--add-data assets/icon.*`: iconos de la ventana accesibles en tiempo de ejecución.
 - `--collect-data customtkinter` / `yt_dlp_ejs`: archivos no-Python (temas JSON y scripts JS)
   que PyInstaller no detecta por sí solo.
 
