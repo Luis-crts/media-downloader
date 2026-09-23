@@ -7,7 +7,6 @@ solo sobrescriben los puntos de extensión:
 - ``can_handle`` / ``supported_types``
 - ``_resolve``: convierte la URL del usuario en la URL que recibirá yt-dlp.
 - ``_analyze``: extracción previa (p. ej. para añadir un plan B de scraping).
-- ``concurrent_fragments``: segmentos HLS/DASH descargados en paralelo.
 """
 from __future__ import annotations
 
@@ -140,10 +139,14 @@ def format_options(download_type: DownloadType, quality: int | None = None) -> d
     raise ValueError(f"Tipo de descarga no soportado: {download_type}")
 
 
-def _retry_backoff(attempt: int) -> float:
+def _retry_backoff(n: int) -> float:
     """Espera creciente entre reintentos (1, 2, 4, 8, 10, 10… s): da tiempo a que
-    la red o el CDN se recuperen en lugar de agotar los reintentos en segundos."""
-    return float(min(2 ** attempt, 10))
+    la red o el CDN se recuperen en lugar de agotar los reintentos en segundos.
+
+    yt-dlp la invoca como ``sleep_func(n=intento)`` (argumento con nombre), así que el
+    parámetro debe llamarse exactamente ``n``.
+    """
+    return float(min(2 ** n, 10))
 
 
 def subtitle_options(langs: tuple[str, ...]) -> dict[str, Any]:
@@ -321,8 +324,6 @@ class ProgressTracker:
 class YtDlpDownloader(BaseDownloader):
     """Flujo completo de descarga con yt-dlp. Ver docstring del módulo."""
 
-    concurrent_fragments = 4
-
     # ------------------------------------------------------ puntos de extensión
     def _resolve(self, request: DownloadRequest, on_progress: ProgressCallback) -> ResolvedMedia:
         return ResolvedMedia(url=request.url.strip(), headers=dict(request.headers))
@@ -479,7 +480,8 @@ class YtDlpDownloader(BaseDownloader):
             "overwrites": False,
             # Reanuda archivos .part y segmentos ya descargados (tras pausa, corte o reinicio).
             "continuedl": True,
-            "concurrent_fragment_downloads": self.concurrent_fragments,
+            # Hilos en paralelo para los segmentos HLS/DASH (elegible en Opciones avanzadas).
+            "concurrent_fragment_downloads": max(1, request.concurrent_fragments),
             "progress_hooks": [tracker.on_download],
             "postprocessor_hooks": [tracker.on_postprocess],
             "post_hooks": [tracker.on_file_done],

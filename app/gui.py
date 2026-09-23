@@ -50,6 +50,8 @@ POLL_MS = 100
 APPEARANCE = {"Sistema": "System", "Claro": "Light", "Oscuro": "Dark"}
 TYPE_BY_LABEL = {t.value: t for t in DownloadType}
 AUTO_QUALITY = "Máxima disponible (automática)"
+THREAD_CHOICES = ("1", "4", "8", "16")
+DEFAULT_THREADS = "8"
 ROW_HEADER, ROW_INPUT, ROW_WEB, ROW_PROGRESS, ROW_ACTIONS, ROW_QUEUE, ROW_LOG = range(7)
 ROW_REFRESH_S = 0.25   # frecuencia máxima de refresco de la fila activa de la cola
 
@@ -149,6 +151,8 @@ class DownloaderApp(ctk.CTk):
         self.filename = ctk.StringVar()
         self.subtitles = ctk.BooleanVar(value=self._settings.get("subtitles", False))
         self.subtitle_langs = ctk.StringVar(value=self._settings.get("subtitle_langs", "es, en"))
+        saved_threads = str(self._settings.get("fragment_threads", DEFAULT_THREADS))
+        self.threads = ctk.StringVar(value=saved_threads if saved_threads in THREAD_CHOICES else DEFAULT_THREADS)
 
         self._build_header()
         self._build_input_card()
@@ -305,16 +309,28 @@ class DownloaderApp(ctk.CTk):
             placeholder_text="Nombre del archivo, sin extensión  (opcional)",
         ).grid(row=2, column=1, columnspan=2, sticky="ew", pady=6, padx=(0, 6))
 
+        ctk.CTkLabel(content, text="Hilos").grid(row=3, column=0, sticky="w", **pad)
+        threads_row = ctk.CTkFrame(content, fg_color="transparent")
+        threads_row.grid(row=3, column=1, columnspan=2, sticky="w", pady=6)
+        ctk.CTkSegmentedButton(
+            threads_row, values=list(THREAD_CHOICES), variable=self.threads, width=200,
+        ).grid(row=0, column=0)
+        ctk.CTkLabel(
+            threads_row, text="descargas simultáneas de segmentos HLS/DASH",
+            text_color=("gray40", "gray65"),
+        ).grid(row=0, column=1, padx=(10, 0))
+
         ctk.CTkLabel(
             content, anchor="w", justify="left", text_color=("gray40", "gray65"),
             text=(
                 "Si la web bloquea la descarga, pon en Referer la dirección de la página del "
-                "reproductor. Para enlaces .m3u8: F12 → Red → filtra «m3u8»."
+                "reproductor. Para enlaces .m3u8: F12 → Red → filtra «m3u8». Más hilos acelera "
+                "los streams HLS; si el servidor responde con errores 429/403, prueba con 4 o 1."
             ),
             wraplength=660,
-        ).grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 0))
+        ).grid(row=4, column=0, columnspan=3, sticky="ew", padx=6, pady=(2, 0))
 
-        for variable in (self.user_agent, self.referer, self.filename):
+        for variable in (self.user_agent, self.referer, self.filename, self.threads):
             variable.trace_add("write", lambda *_: self._update_advanced_summary())
         self._update_advanced_summary()
 
@@ -478,6 +494,7 @@ class DownloaderApp(ctk.CTk):
             filename=filename,
             subtitles=download_type.is_video and self.subtitles.get(),
             subtitle_langs=self._parse_subtitle_langs(),
+            concurrent_fragments=int(self.threads.get()),
         )
 
     def _parse_subtitle_langs(self) -> tuple[str, ...]:
@@ -523,7 +540,8 @@ class DownloaderApp(ctk.CTk):
             parts.append(f"Nombre: {shorten(self.filename.get().strip(), 30)}")
         if self.user_agent.get().strip() not in ("", default_user_agent()):
             parts.append("User-Agent personalizado")
-        self.web_card.set_summary(" · ".join(parts) or "User-Agent, Referer y nombre del archivo")
+        parts.append(f"{self.threads.get()} hilo{'s' if self.threads.get() != '1' else ''}")
+        self.web_card.set_summary(" · ".join(parts))
 
     # ------------------------------------------------------------- análisis
     def _start_analyze(self) -> None:
@@ -598,6 +616,7 @@ class DownloaderApp(ctk.CTk):
             allow_playlist=request.allow_playlist,
             subtitles=self.subtitles.get(),
             subtitle_langs=self.subtitle_langs.get(),
+            fragment_threads=self.threads.get(),
         )
         if self.user_agent.get().strip() not in ("", default_user_agent()):
             self._settings["user_agent"] = self.user_agent.get().strip()

@@ -49,6 +49,7 @@ class DownloadRequest:
     filename: str | None = None                # nombre de salida sin extensión (opcional)
     subtitles: bool = False                    # descargar e incrustar subtítulos (solo video)
     subtitle_langs: tuple[str, ...] = ("es", "en")  # códigos de idioma; ("all",) = todos
+    concurrent_fragments: int = 8              # segmentos HLS/DASH descargados en paralelo
 
 
 @dataclass(frozen=True)

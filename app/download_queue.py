@@ -60,6 +60,8 @@ class QueueItem:
             parts.append(f"≤{self.request.quality}p")
         if self.request.subtitles:
             parts.append("subs " + ",".join(self.request.subtitle_langs))
+        if self.request.concurrent_fragments != 8:
+            parts.append(f"{self.request.concurrent_fragments} hilos")
         if self.source:
             parts.append(self.source)
         return " · ".join(parts)
@@ -187,6 +189,7 @@ def request_to_dict(request: DownloadRequest) -> dict:
         "filename": request.filename,
         "subtitles": request.subtitles,
         "subtitle_langs": list(request.subtitle_langs),
+        "concurrent_fragments": request.concurrent_fragments,
     }
 
 
@@ -201,6 +204,7 @@ def request_from_dict(data: dict) -> DownloadRequest:
         filename=data.get("filename"),
         subtitles=bool(data.get("subtitles", False)),
         subtitle_langs=tuple(data.get("subtitle_langs") or ("es", "en")),
+        concurrent_fragments=int(data.get("concurrent_fragments") or 8),
     )
 
 

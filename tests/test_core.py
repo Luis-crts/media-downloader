@@ -2,6 +2,7 @@
 import re
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from yt_dlp.utils import DownloadCancelled
@@ -197,7 +198,31 @@ class OptionsTests(unittest.TestCase):
         self.assertEqual(options["socket_timeout"], 30)
         self.assertTrue(options["continuedl"])
         backoff = options["retry_sleep_functions"]["fragment"]
-        self.assertEqual([backoff(n) for n in range(6)], [1, 2, 4, 8, 10, 10])
+        # yt-dlp la llama con argumento con nombre: sleep_func(n=…).
+        self.assertEqual([backoff(n=k) for k in range(6)], [1, 2, 4, 8, 10, 10])
+
+    def test_fragment_threads_follow_request(self):
+        self.assertEqual(self._options()["concurrent_fragment_downloads"], 8)
+        for threads in (1, 4, 16):
+            options = self._options(concurrent_fragments=threads)
+            self.assertEqual(options["concurrent_fragment_downloads"], threads)
+
+    def test_backoff_through_yt_dlp_retry_manager(self):
+        """Regresión: «_retry_backoff() got an unexpected keyword argument 'n'»."""
+        from yt_dlp.utils import RetryManager
+
+        options = self._options()
+        waits = []
+        with mock.patch("time.sleep", waits.append):
+            for kind in ("http", "fragment", "extractor"):
+                # Es la función de yt-dlp que falló: llama a sleep_func(n=count - 1).
+                for count in (1, 2, 3):
+                    RetryManager.report_retry(
+                        OSError("fallo simulado"), count, options["fragment_retries"],
+                        sleep_func=options["retry_sleep_functions"][kind],
+                        info=lambda *_: None, warn=lambda *_: None,
+                    )
+        self.assertEqual(waits, [1.0, 2.0, 4.0] * 3)
 
     def test_subtitle_languages(self):
         patterns = subtitle_options(("es", "EN"))["subtitleslangs"]

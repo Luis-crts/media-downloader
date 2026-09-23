@@ -372,7 +372,8 @@ se conserva también el `.srt` junto al video.
 ### Cortes de red
 
 Cada petición y cada segmento HLS/DASH se reintentan hasta **20 veces**, con espera creciente
-entre intentos (1, 2, 4, 8 y luego 10 s) y un tiempo de espera de conexión de **30 s**. Los
+entre intentos (1, 2, 4, 8 y luego 10 s, mediante `retry_sleep_functions` de yt-dlp) y un tiempo
+de espera de conexión de **30 s**. Los
 archivos parciales y los segmentos ya descargados se reutilizan (`continuedl`), así que un corte
 de red o un reinicio no obliga a empezar de cero.
 
@@ -386,6 +387,7 @@ abierta). Plegada, su cabecera resume lo configurado, p. ej. *Referer: www.sitio
 |---|---|
 | **User-Agent** | Se identifica como un navegador de escritorio (valor actualizado por yt-dlp). *Restablecer* recupera el valor por defecto. |
 | **Referer** | Página donde se reproduce el video. Muchos CDN devuelven **403** si falta. |
+| **Hilos** | Segmentos HLS/DASH descargados en paralelo: 1, 4, **8** (por defecto) o 16. Más hilos acelera los streams (en pruebas, 8 hilos ≈ 2× más rápido que 1); si el servidor responde con 429/403, baja a 4 o 1. Se guarda con cada descarga de la cola. |
 | **Nombre** | Nombre del archivo final (sin extensión). Si se deja vacío se usa el título de la página, el nombre de la URL o `video-AAAAMMDD-HHMMSS`. Se vacía al añadir a la cola, porque es propio de cada descarga. |
 
 **Calidad:** pulsa **Analizar** para ver las resoluciones del stream (p. ej. 1080p, 720p…) y
@@ -449,6 +451,9 @@ cambian a menudo, así que conviene cubrir cada uno con una prueba en `tests/`.
   programa»), se usa `%LOCALAPPDATA%\MediaDownloader\` o `~/.local/share/media-downloader/`,
   donde también está `self-check.txt`.
 - **Diagnóstico rápido:** `MediaDownloader.exe --self-check` (o `python main.py --self-check`).
+- **Prueba de descarga real sin interfaz:** `MediaDownloader.exe --test-download URL` descarga el
+  enlace (calidad baja) en la carpeta de datos del usuario (`test-download/`) y deja el resultado en
+  `self-check.txt` y en el log. Código de salida 0 = correcto.
 - **Windows SmartScreen / antivirus:** los ejecutables de PyInstaller sin firmar pueden
   mostrar advertencias, sobre todo en `--onefile`. Usa `--onedir` o firma el ejecutable.
 - **Linux, "no se puede abrir el lanzador":** haz clic derecho sobre el icono del Escritorio →

@@ -2,6 +2,7 @@
 
     python main.py                 # abre la interfaz
     python main.py --self-check    # verifica recursos y dependencias (útil tras empaquetar)
+    python main.py --test-download URL   # descarga real sin interfaz (diagnóstico)
 """
 from __future__ import annotations
 
@@ -96,10 +97,43 @@ def self_check() -> int:
     return 0 if ok else 1
 
 
+def test_download(url: str) -> int:
+    """Descarga real sin interfaz (diagnóstico del binario): MediaDownloader --test-download URL
+
+    Guarda el archivo en la carpeta de datos del usuario (subcarpeta test-download) con la
+    calidad más baja disponible y deja el resultado en el log y en self-check.txt.
+    """
+    from app.core import DownloaderError, DownloadRequest, DownloadType, get_downloader
+
+    output = user_data_dir() / "test-download"
+    request = DownloadRequest(
+        url=url, output_dir=output, download_type=DownloadType.WEB_VIDEO,
+        quality=240, filename="test-download", concurrent_fragments=8,
+    )
+    try:
+        result = get_downloader(url, request.download_type).download(request, lambda _p: None)
+        files = ", ".join(f"{f.name} ({f.stat().st_size / 1e6:.1f} MB)" for f in result.completed)
+        report, code = f"test-download: OK -> {files}\n", 0
+    except DownloaderError as exc:
+        report, code = f"test-download: FALLO -> {exc.title}: {exc} | {exc.detail}\n", 1
+    except Exception as exc:  # cualquier otro fallo también debe quedar registrado
+        log.exception("test-download: error inesperado")
+        report, code = f"test-download: FALLO -> {type(exc).__name__}: {exc}\n", 1
+    (user_data_dir() / "self-check.txt").write_text(report, encoding="utf-8")
+    log.info(report.strip())
+    return code
+
+
 def main() -> int:
     setup_logging()
     if "--self-check" in sys.argv:
         return self_check()
+    if "--test-download" in sys.argv:
+        index = sys.argv.index("--test-download")
+        if index + 1 >= len(sys.argv):
+            log.error("Uso: --test-download URL")
+            return 2
+        return test_download(sys.argv[index + 1])
 
     set_windows_app_id()
     try:

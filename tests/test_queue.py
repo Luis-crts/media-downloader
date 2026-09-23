@@ -113,7 +113,7 @@ class PersistenceTests(unittest.TestCase):
                 request=request(
                     "https://cdn.example/master.m3u8", DownloadType.WEB_VIDEO, quality=720,
                     headers={"Referer": "https://sitio.example/ver"}, filename="Película",
-                    subtitles=True, subtitle_langs=("es",),
+                    subtitles=True, subtitle_langs=("es",), concurrent_fragments=16,
                 ),
                 source="Web / M3U8", title="Película (2024)",
             ),

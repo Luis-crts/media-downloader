@@ -46,7 +46,6 @@ _NOT_FOUND_HINT = (
 class GenericDownloader(YtDlpDownloader):
     name = "Web / M3U8"
     supported_types = tuple(DownloadType)
-    concurrent_fragments = 8   # los streams HLS de películas tienen miles de segmentos
 
     @classmethod
     def can_handle(cls, url: str) -> bool:
