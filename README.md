@@ -35,6 +35,8 @@ App musica/
 └── app/
     ├── paths.py                   # Rutas compatibles con PyInstaller (sys._MEIPASS)
     ├── gui.py                     # Interfaz CustomTkinter (solo presentación)
+    ├── widgets.py                 # Sección plegable y lista de la cola
+    ├── download_queue.py          # Modelo de la cola (sin interfaz, con pruebas)
     └── core/
         ├── base.py                # Contratos: BaseDownloader, modelos, errores, registro
         ├── ytdlp_backend.py       # Flujo común yt-dlp: analizar, descargar, progreso, errores
@@ -42,7 +44,7 @@ App musica/
         ├── generic.py             # Proveedor Web / M3U8 (respaldo para cualquier URL)
         ├── extractor.py           # Resolvers por sitio + sniffer de páginas (HTML/iframes/JS)
         └── dependencies.py        # Detección de FFmpeg, runtime JS y conexión
-tests/test_core.py                 # Pruebas sin red (python -m unittest discover -s tests)
+tests/                             # Pruebas sin red (python -m unittest discover -s tests)
 ```
 
 Selección de proveedor (`get_downloader(url, tipo)`): se recorre el registro en orden y se
@@ -312,6 +314,27 @@ En Linux: `curl -fsSL https://deno.land/install.sh | sh`.
 3. (Video) Opcional: marca **Subtítulos** e indica los idiomas.
 4. Elige la carpeta de destino y pulsa **Descargar**.
 
+### Cola de descargas
+
+Pulsar **Descargar** mientras otra descarga está en curso no la interrumpe: el enlace se añade
+a la **cola** (el botón pasa a llamarse *Añadir a la cola*) y se descarga de uno en uno, en
+orden. Cada elemento guarda sus propias opciones (formato, calidad, subtítulos, cabeceras,
+nombre, carpeta), así que puedes cambiarlas entre un enlace y otro.
+
+- La lista *Cola de descargas* muestra cada elemento como **Pendiente**, **Descargando**,
+  **En pausa**, **Completada**, **Error** o **Cancelada**, con su progreso.
+- Al terminar (bien, con error o cancelada) empieza automáticamente la siguiente.
+- **Pausar** pausa la descarga activa y la cola espera; **Cancelar** cancela solo la activa y
+  sigue con la siguiente.
+- *Quitar* elimina un pendiente; *Abrir* abre la carpeta de una completada; *Vaciar
+  pendientes* y *Limpiar terminadas* actúan sobre toda la lista.
+- Un enlace que ya está pendiente o en curso (mismo enlace y formato) no se añade dos veces.
+- Los errores quedan en la fila y en *Actividad*; el diálogo de error solo aparece cuando la
+  cola se detiene, para no bloquear las descargas siguientes.
+- *Analizar* (calidades) funciona también mientras hay una descarga en curso.
+- La cola vive en memoria: al cerrar la aplicación con elementos pendientes se pide
+  confirmación y no se conservan para la próxima sesión.
+
 Las listas se guardan en una subcarpeta con su nombre y numeradas (`001 - Título.mp3`).
 Si un elemento de la lista no está disponible, se omite y se informa al final.
 La última carpeta, formato, subtítulos y tema se recuerdan en `~/.media_downloader.json`.
@@ -349,14 +372,15 @@ de red o un reinicio no obliga a empezar de cero.
 
 ## Películas / Video web (M3U8)
 
-Elige **Formato → Películas / Video Web (M3U8 / Enlace genérico)**. Aparece el panel
-*Opciones de video web*:
+Elige **Formato → Películas / Video Web (M3U8 / Enlace genérico)**. Aparece la sección
+plegable **▸ Opciones avanzadas de video web** (cerrada por defecto; se recuerda si la dejas
+abierta). Plegada, su cabecera resume lo configurado, p. ej. *Referer: www.sitio.com*:
 
 | Campo | Para qué sirve |
 |---|---|
 | **User-Agent** | Se identifica como un navegador de escritorio (valor actualizado por yt-dlp). *Restablecer* recupera el valor por defecto. |
 | **Referer** | Página donde se reproduce el video. Muchos CDN devuelven **403** si falta. |
-| **Nombre** | Nombre del archivo final (sin extensión). Si se deja vacío se usa el título de la página, el nombre de la URL o `video-AAAAMMDD-HHMMSS`. |
+| **Nombre** | Nombre del archivo final (sin extensión). Si se deja vacío se usa el título de la página, el nombre de la URL o `video-AAAAMMDD-HHMMSS`. Se vacía al añadir a la cola, porque es propio de cada descarga. |
 
 **Calidad:** pulsa **Analizar** para ver las resoluciones del stream (p. ej. 1080p, 720p…) y
 elige una; con *Máxima disponible* se toma la mejor automáticamente. El selector también
