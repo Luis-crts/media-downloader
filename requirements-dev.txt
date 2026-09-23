@@ -1,0 +1,5 @@
+-r requirements.txt
+# Empaquetado
+pyinstaller>=6.10
+# Solo para regenerar los iconos (packaging/make_icon.py)
+pillow>=10.0

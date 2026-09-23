@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.part
+
+# Salida de PyInstaller
+build/
+dist/
+*.spec
+
+# FFmpeg portable (binarios grandes, cada usuario pone el suyo)
+bin/

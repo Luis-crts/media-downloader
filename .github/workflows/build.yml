@@ -1,0 +1,52 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu 22.04: el binario enlaza contra una glibc antigua y funciona en distros más nuevas.
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Dependencias del sistema (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtk8.6 libtcl8.6
+
+      - name: Dependencias de Python
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Compilar y verificar (--self-check)
+        run: python build.py
+
+      - name: Empaquetar (Linux, conserva permisos de ejecución)
+        if: runner.os == 'Linux'
+        run: tar -czf MediaDownloader-linux.tar.gz -C dist MediaDownloader
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: MediaDownloader-linux
+          path: MediaDownloader-linux.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: MediaDownloader-windows
+          path: dist/MediaDownloader/

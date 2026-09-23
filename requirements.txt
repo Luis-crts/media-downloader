@@ -1,0 +1,4 @@
+# Descarga (el extra [default] incluye mutagen, yt-dlp-ejs, certifi, websockets, etc.)
+yt-dlp[default]>=2025.11.12
+# Interfaz gráfica
+customtkinter>=5.2.2
