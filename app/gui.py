@@ -22,8 +22,8 @@ from urllib.parse import urlsplit
 import customtkinter as ctk
 
 from app import __version__
-from app.download_queue import DownloadQueue, ItemStatus, QueueItem
-from app.paths import log_file_path, resource_path
+from app.download_queue import DownloadQueue, ItemStatus, QueueItem, load_queue, save_queue
+from app.paths import log_file_path, queue_file_path, resource_path
 from app.widgets import CollapsibleSection, QueueView, shorten
 from app.core import (
     DownloadCancelledError,
@@ -87,7 +87,7 @@ def open_path(path: Path) -> None:
 
 def load_settings() -> dict:
     try:
-        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
 
@@ -161,8 +161,9 @@ class DownloaderApp(ctk.CTk):
         self._on_type_change(self.download_type.get())
         self._on_subtitles_toggle()
         self._check_dependencies()
+        self._restore_queue()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(POLL_MS, self._poll_events)
+        self._poll_job = self.after(POLL_MS, self._poll_events)
 
     # ------------------------------------------------------------------ UI
     def _set_window_icon(self) -> None:
@@ -374,6 +375,8 @@ class DownloaderApp(ctk.CTk):
             on_open=self._open_item_folder,
             on_clear_finished=self._clear_finished,
             on_clear_pending=self._clear_pending,
+            on_move=self._move_item,
+            on_start=self._start_queue,
             corner_radius=12,
         )
         self.queue_view.grid(row=ROW_QUEUE, column=0, sticky="ew", padx=20, pady=(0, 14))
@@ -604,7 +607,7 @@ class DownloaderApp(ctk.CTk):
 
         item = self._queue.add(request, source=downloader.name)
         self.queue_view.add_item(item)
-        self._refresh_counts()
+        self._queue_changed()
         log.info("En cola #%d (%s): %s", item.id, item.summary, request.url)
         if self._active_id is not None:
             self._log(f"＋ Añadido a la cola ({self._queue.pending_count()} pendiente/s): {request.url}")
@@ -638,7 +641,7 @@ class DownloaderApp(ctk.CTk):
         item.status = ItemStatus.ACTIVE
         item.message = "Iniciando…"
         self.queue_view.update_item(item)
-        self._refresh_counts()
+        self._queue_changed()
 
         self._reset_progress()
         self.item_label.configure(text=shorten(item.display_title, 80))
@@ -681,20 +684,20 @@ class DownloaderApp(ctk.CTk):
     def _remove_from_queue(self, item_id: int) -> None:
         if self._queue.remove(item_id):
             self.queue_view.remove_item(item_id)
-            self._refresh_counts()
+            self._queue_changed()
             log.info("Quitado de la cola #%d", item_id)
 
     def _clear_finished(self) -> None:
         for item_id in self._queue.clear_finished():
             self.queue_view.remove_item(item_id)
-        self._refresh_counts()
+        self._queue_changed()
 
     def _clear_pending(self) -> None:
         pending = self._queue.pending_count()
         if pending and messagebox.askyesno(APP_NAME, f"¿Quitar {pending} descarga(s) pendiente(s)?"):
             for item_id in self._queue.clear_pending():
                 self.queue_view.remove_item(item_id)
-            self._refresh_counts()
+            self._queue_changed()
             self._log(f"■ {pending} pendiente(s) quitada(s) de la cola")
 
     def _open_item_folder(self, item: QueueItem) -> None:
@@ -702,8 +705,45 @@ class DownloaderApp(ctk.CTk):
         if folder.is_dir():
             open_path(folder)
 
-    def _refresh_counts(self) -> None:
-        self.queue_view.set_counts(self._queue.counts())
+    def _move_item(self, item_id: int, direction: int) -> None:
+        """▲ / ▼: cambia la prioridad de un pendiente sin tocar la descarga activa."""
+        if self._queue.move(item_id, direction):
+            item = self._queue.get(item_id)
+            log.info("Cola #%d %s", item_id, "sube" if direction < 0 else "baja")
+            self._queue_changed()
+            if item and direction < 0 and self._queue.next_pending() is item:
+                self._log(f"⇡ Siguiente en la cola: {shorten(item.display_title, 60)}")
+
+    def _start_queue(self) -> None:
+        self._log("▶ Cola iniciada")
+        self._start_next()
+
+    def _queue_changed(self) -> None:
+        """Tras cualquier cambio en la cola: reordena la lista, actualiza contadores y la guarda."""
+        self.queue_view.sync(self._queue.items)
+        self.queue_view.set_counts(self._queue.counts(), idle=self._active_id is None)
+        self._save_queue()
+
+    # ------------------------------------------------------- persistencia
+    def _save_queue(self) -> None:
+        """Guarda la activa (como pendiente, se reanudará desde sus .part) y las pendientes."""
+        try:
+            save_queue(queue_file_path(), self._queue.unfinished())
+        except OSError:
+            log.warning("No se pudo guardar la cola en %s", queue_file_path(), exc_info=True)
+
+    def _restore_queue(self) -> None:
+        """Carga la cola de la sesión anterior. No arranca sola: se inicia con «Iniciar cola»."""
+        items = load_queue(queue_file_path())
+        if not items:
+            return
+        for item in self._queue.restore(items):
+            self.queue_view.add_item(item)
+        self._queue_changed()
+        message = f"Se restauraron {len(items)} descarga(s) pendiente(s). Pulsa «▶ Iniciar cola»."
+        self._log(f"↺ {message}")
+        self.status_label.configure(text=message)
+        log.info("Cola restaurada: %d elemento(s) desde %s", len(items), queue_file_path())
 
     # ------------------------------------------------------ pausa / cancelar
     def _active_item(self) -> QueueItem | None:
@@ -732,7 +772,7 @@ class DownloaderApp(ctk.CTk):
             self._log("⏸ Descarga en pausa (la cola espera)")
             log.info("Usuario: pausar #%d", item.id)
         self.queue_view.update_item(item)
-        self._refresh_counts()
+        self._queue_changed()
         self._update_controls()
 
     def _cancel_download(self) -> None:
@@ -760,7 +800,7 @@ class DownloaderApp(ctk.CTk):
                     self._on_analyze_error(payload)  # type: ignore[arg-type]
         except queue.Empty:
             pass
-        self.after(POLL_MS, self._poll_events)
+        self._poll_job = self.after(POLL_MS, self._poll_events)
 
     def _apply_progress(self, item_id: int, p: ProgressInfo) -> None:
         item = self._queue.get(item_id)
@@ -869,7 +909,7 @@ class DownloaderApp(ctk.CTk):
             item.percent = 100.0
         log.info("Cola #%d → %s", item.id, status.name)
         self.queue_view.update_item(item)
-        self._refresh_counts()
+        self._queue_changed()
         self._update_controls()
 
     def _show_queue_summary(self) -> None:
@@ -930,11 +970,19 @@ class DownloaderApp(ctk.CTk):
             parts = (["1 descarga en curso"] if active else []) + (
                 [f"{pending} pendiente(s)"] if pending else []
             )
-            if not messagebox.askyesno(APP_NAME, f"Hay {' y '.join(parts)}. ¿Cancelar y salir?"):
+            if not messagebox.askyesno(
+                APP_NAME,
+                f"Hay {' y '.join(parts)}.\n\nSe guardarán y podrás continuarlas la próxima vez "
+                "que abras la aplicación (la descarga en curso se reanudará desde donde iba).\n\n"
+                "¿Salir ahora?",
+            ):
                 return
             log.info("Cierre con cola: activa=%s pendientes=%d", active, pending)
-            self._cancel_event.set()
-            self._pause_event.clear()
+        # Se guarda antes de cancelar: la activa sigue contando como no terminada.
+        self._save_queue()
+        self._cancel_event.set()
+        self._pause_event.clear()
+        self.after_cancel(self._poll_job)   # evita un callback sobre la ventana ya destruida
         self.destroy()
 
 

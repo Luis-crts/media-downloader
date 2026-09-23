@@ -89,7 +89,7 @@ class CollapsibleSection(ctk.CTkFrame):
 
 
 class QueueRow(ctk.CTkFrame):
-    """Fila de la cola: estado · título/detalle · progreso · acción."""
+    """Fila de la cola: estado · título/detalle · progreso · ▲▼ · acción."""
 
     def __init__(
         self,
@@ -97,11 +97,14 @@ class QueueRow(ctk.CTkFrame):
         item: QueueItem,
         on_remove: Callable[[int], None],
         on_open: Callable[[QueueItem], None],
+        on_move: Callable[[int, int], None],
     ) -> None:
         super().__init__(master, corner_radius=8, fg_color=("gray88", "gray20"))
         self._on_remove = on_remove
         self._on_open = on_open
+        self._on_move = on_move
         self._item = item
+        self._position: tuple[int, int] | None = None
         self.grid_columnconfigure(1, weight=1)
 
         self.status = ctk.CTkLabel(
@@ -117,12 +120,33 @@ class QueueRow(ctk.CTkFrame):
         self.bar.grid(row=0, column=2, rowspan=2, padx=(10, 4))
         self.percent = ctk.CTkLabel(self, width=48, anchor="e", font=ctk.CTkFont(size=12))
         self.percent.grid(row=0, column=3, rowspan=2, padx=(0, 6))
+        # Prioridad: solo los pendientes se pueden subir o bajar.
+        arrow_style = {
+            "width": 28, "height": 26, "fg_color": "transparent", "border_width": 1,
+            "text_color": ("gray10", "gray90"), "text_color_disabled": ("gray75", "gray35"),
+        }
+        self.up = ctk.CTkButton(self, text="▲", command=lambda: self._on_move(self._item.id, -1), **arrow_style)
+        self.up.grid(row=0, column=4, rowspan=2, padx=(4, 2))
+        self.down = ctk.CTkButton(self, text="▼", command=lambda: self._on_move(self._item.id, 1), **arrow_style)
+        self.down.grid(row=0, column=5, rowspan=2, padx=(2, 4))
         self.action = ctk.CTkButton(
             self, width=72, height=26, fg_color="transparent", border_width=1,
             text_color=("gray10", "gray90"), command=self._on_action,
         )
-        self.action.grid(row=0, column=4, rowspan=2, padx=(4, 10))
+        self.action.grid(row=0, column=6, rowspan=2, padx=(4, 10))
         self.update_item(item)
+
+    def set_position(self, position: tuple[int, int] | None) -> None:
+        """Posición (índice, total) entre los pendientes; None si no está pendiente."""
+        self._position = position
+        if position is None:
+            # Se vacían en lugar de ocultarse para mantener alineadas las columnas.
+            for button in (self.up, self.down):
+                button.configure(text="", state="disabled", border_width=0)
+            return
+        index, total = position
+        self.up.configure(text="▲", border_width=1, state="normal" if index > 0 else "disabled")
+        self.down.configure(text="▼", border_width=1, state="normal" if index < total - 1 else "disabled")
 
     def update_item(self, item: QueueItem) -> None:
         self._item = item
@@ -176,11 +200,14 @@ class QueueView(ctk.CTkFrame):
         on_open: Callable[[QueueItem], None],
         on_clear_finished: Callable[[], None],
         on_clear_pending: Callable[[], None],
+        on_move: Callable[[int, int], None],
+        on_start: Callable[[], None],
         **kwargs,
     ) -> None:
         super().__init__(master, **kwargs)
         self._on_remove = on_remove
         self._on_open = on_open
+        self._on_move = on_move
         self._rows: dict[int, QueueRow] = {}
         self.grid_columnconfigure(0, weight=1)
 
@@ -196,14 +223,17 @@ class QueueView(ctk.CTkFrame):
             "height": 26, "fg_color": "transparent", "border_width": 1,
             "text_color": ("gray10", "gray90"),
         }
+        # Solo visible con pendientes y nada en curso (p. ej. cola restaurada al abrir la app).
+        self.start_button = ctk.CTkButton(header, text="▶ Iniciar cola", width=110, height=26, command=on_start)
+        self.start_button.grid(row=0, column=2, padx=(0, 6))
         self.clear_pending_button = ctk.CTkButton(
             header, text="Vaciar pendientes", width=130, command=on_clear_pending, **button_style,
         )
-        self.clear_pending_button.grid(row=0, column=2, padx=(0, 6))
+        self.clear_pending_button.grid(row=0, column=3, padx=(0, 6))
         self.clear_finished_button = ctk.CTkButton(
             header, text="Limpiar terminadas", width=130, command=on_clear_finished, **button_style,
         )
-        self.clear_finished_button.grid(row=0, column=3)
+        self.clear_finished_button.grid(row=0, column=4)
 
         self.rows_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.rows_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
@@ -212,11 +242,21 @@ class QueueView(ctk.CTkFrame):
             self.rows_frame, text_color=_MUTED,
             text="La cola está vacía. Pulsa «Descargar» para añadir enlaces; se descargan de uno en uno.",
         )
-        self.set_counts({status: 0 for status in ItemStatus})
+        self.set_counts({status: 0 for status in ItemStatus}, idle=True)
 
     def add_item(self, item: QueueItem) -> None:
-        row = QueueRow(self.rows_frame, item, self._on_remove, self._on_open)
+        row = QueueRow(self.rows_frame, item, self._on_remove, self._on_open, self._on_move)
         self._rows[item.id] = row
+        self._regrid()
+
+    def sync(self, items: list[QueueItem]) -> None:
+        """Reordena las filas según la cola y actualiza las flechas de prioridad."""
+        pending = [i.id for i in items if i.status is ItemStatus.PENDING]
+        self._rows = {i.id: self._rows[i.id] for i in items if i.id in self._rows}
+        for item in items:
+            row = self._rows.get(item.id)
+            if row:
+                row.set_position((pending.index(item.id), len(pending)) if item.id in pending else None)
         self._regrid()
 
     # No se llama update(): sobrescribiría Misc.update() de Tk.
@@ -231,13 +271,17 @@ class QueueView(ctk.CTkFrame):
             row.destroy()
             self._regrid()
 
-    def set_counts(self, counts: dict[ItemStatus, int]) -> None:
+    def set_counts(self, counts: dict[ItemStatus, int], idle: bool) -> None:
         active = counts[ItemStatus.ACTIVE] + counts[ItemStatus.PAUSED]
         finished = counts[ItemStatus.DONE] + counts[ItemStatus.FAILED] + counts[ItemStatus.CANCELLED]
         self.counts.configure(
             text=f"{active} activa · {counts[ItemStatus.PENDING]} pendiente(s) · {finished} terminada(s)"
         )
         self.clear_pending_button.configure(state="normal" if counts[ItemStatus.PENDING] else "disabled")
+        if idle and counts[ItemStatus.PENDING]:
+            self.start_button.grid()
+        else:
+            self.start_button.grid_remove()
         self.clear_finished_button.configure(state="normal" if finished else "disabled")
 
     def _regrid(self) -> None:

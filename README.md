@@ -326,14 +326,20 @@ nombre, carpeta), así que puedes cambiarlas entre un enlace y otro.
 - Al terminar (bien, con error o cancelada) empieza automáticamente la siguiente.
 - **Pausar** pausa la descarga activa y la cola espera; **Cancelar** cancela solo la activa y
   sigue con la siguiente.
+- **▲ / ▼** cambian la prioridad de un pendiente (p. ej. adelantar canciones ligeras a
+  películas pesadas). Solo reordenan los pendientes entre sí: la descarga activa no se toca.
 - *Quitar* elimina un pendiente; *Abrir* abre la carpeta de una completada; *Vaciar
   pendientes* y *Limpiar terminadas* actúan sobre toda la lista.
 - Un enlace que ya está pendiente o en curso (mismo enlace y formato) no se añade dos veces.
 - Los errores quedan en la fila y en *Actividad*; el diálogo de error solo aparece cuando la
   cola se detiene, para no bloquear las descargas siguientes.
 - *Analizar* (calidades) funciona también mientras hay una descarga en curso.
-- La cola vive en memoria: al cerrar la aplicación con elementos pendientes se pide
-  confirmación y no se conservan para la próxima sesión.
+- **La cola se conserva entre sesiones.** Se guarda automáticamente en cada cambio (también
+  ante un cierre inesperado) en `queue.json`, dentro de la carpeta de datos del usuario
+  (`%LOCALAPPDATA%\MediaDownloader\` en Windows, `~/.local/share/media-downloader/` en
+  Linux). Al volver a abrir la aplicación, las pendientes reaparecen en el mismo orden (la que
+  estaba en curso, la primera, y se reanuda desde sus `.part`). No arrancan solas: pulsa
+  **▶ Iniciar cola**. Las terminadas no se guardan.
 
 Las listas se guardan en una subcarpeta con su nombre y numeradas (`001 - Título.mp3`).
 Si un elemento de la lista no está disponible, se omite y se informa al final.

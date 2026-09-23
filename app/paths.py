@@ -60,6 +60,11 @@ def log_file_path() -> Path:
         return user_data_dir() / LOG_FILENAME
 
 
+def queue_file_path() -> Path:
+    """Cola de descargas pendientes, guardada entre sesiones."""
+    return user_data_dir() / "queue.json"
+
+
 def user_data_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")

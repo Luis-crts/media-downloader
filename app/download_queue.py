@@ -6,12 +6,16 @@ mediante eventos), así que no necesita bloqueos.
 from __future__ import annotations
 
 import itertools
+import json
+import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from app.core import DownloadRequest
+from app.core import DownloadRequest, DownloadType
 
+log = logging.getLogger(__name__)
 _ids = itertools.count(1)
 
 
@@ -106,6 +110,16 @@ class DownloadQueue:
         self._items.append(item)
         return item
 
+    def restore(self, items: list[QueueItem]) -> list[QueueItem]:
+        """Añade elementos cargados de disco como pendientes (omite duplicados)."""
+        added = []
+        for item in items:
+            if self.find_duplicate(item.request) is None:
+                item.status = ItemStatus.PENDING
+                self._items.append(item)
+                added.append(item)
+        return added
+
     def remove(self, item_id: int) -> bool:
         """Quita un elemento que no se esté descargando."""
         item = self.get(item_id)
@@ -123,3 +137,115 @@ class DownloadQueue:
         removed = [i.id for i in self._items if i.status is ItemStatus.PENDING]
         self._items = [i for i in self._items if i.status is not ItemStatus.PENDING]
         return removed
+
+    def move(self, item_id: int, direction: int) -> bool:
+        """Sube (-1) o baja (+1) un pendiente un puesto *entre los pendientes*.
+
+        Solo intercambia posiciones con el pendiente vecino, así que la descarga
+        activa y las terminadas no cambian de sitio.
+        """
+        item = self.get(item_id)
+        if item is None or item.status is not ItemStatus.PENDING or direction not in (-1, 1):
+            return False
+        pending = [i for i in self._items if i.status is ItemStatus.PENDING]
+        index = pending.index(item)
+        neighbour_index = index + direction
+        if not 0 <= neighbour_index < len(pending):
+            return False
+        neighbour = pending[neighbour_index]
+        a, b = self._items.index(item), self._items.index(neighbour)
+        self._items[a], self._items[b] = self._items[b], self._items[a]
+        return True
+
+    def pending_position(self, item_id: int) -> tuple[int, int] | None:
+        """(posición, total) de un pendiente entre los pendientes, empezando en 0."""
+        pending = [i.id for i in self._items if i.status is ItemStatus.PENDING]
+        return (pending.index(item_id), len(pending)) if item_id in pending else None
+
+    # ---------------------------------------------------------- persistencia
+    def unfinished(self) -> list[QueueItem]:
+        """Lo que hay que conservar al cerrar: la activa (primero) y las pendientes."""
+        running = [i for i in self._items if i.status.running]
+        pending = [i for i in self._items if i.status is ItemStatus.PENDING]
+        return running + pending
+
+
+# --------------------------------------------------------------------------- #
+# Persistencia en JSON
+# --------------------------------------------------------------------------- #
+QUEUE_FILE_VERSION = 1
+
+
+def request_to_dict(request: DownloadRequest) -> dict:
+    return {
+        "url": request.url,
+        "output_dir": str(request.output_dir),
+        "download_type": request.download_type.name,
+        "allow_playlist": request.allow_playlist,
+        "quality": request.quality,
+        "headers": dict(request.headers),
+        "filename": request.filename,
+        "subtitles": request.subtitles,
+        "subtitle_langs": list(request.subtitle_langs),
+    }
+
+
+def request_from_dict(data: dict) -> DownloadRequest:
+    return DownloadRequest(
+        url=str(data["url"]),
+        output_dir=Path(data["output_dir"]),
+        download_type=DownloadType[data["download_type"]],
+        allow_playlist=bool(data.get("allow_playlist", True)),
+        quality=data.get("quality"),
+        headers={str(k): str(v) for k, v in (data.get("headers") or {}).items()},
+        filename=data.get("filename"),
+        subtitles=bool(data.get("subtitles", False)),
+        subtitle_langs=tuple(data.get("subtitle_langs") or ("es", "en")),
+    )
+
+
+def save_queue(path: Path, items: list[QueueItem]) -> None:
+    """Guarda los elementos como pendientes. Escritura atómica: nunca queda a medias."""
+    payload = {
+        "version": QUEUE_FILE_VERSION,
+        "items": [
+            {"request": request_to_dict(i.request), "source": i.source, "title": i.title}
+            for i in items
+        ],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_queue(path: Path) -> list[QueueItem]:
+    """Carga la cola guardada. Los elementos inválidos se descartan y se registran.
+
+    Si el archivo está dañado se renombra a ``.bad`` para no perderlo ni volver a fallar.
+    """
+    if not path.is_file():
+        return []
+    try:
+        # utf-8-sig: acepta también archivos con BOM (p. ej. editados con el Bloc de notas).
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        entries = payload["items"]
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("Cola guardada ilegible: %s (se renombra a .bad)", path, exc_info=True)
+        try:
+            os.replace(path, path.with_suffix(path.suffix + ".bad"))
+        except OSError:
+            pass
+        return []
+
+    items = []
+    for entry in entries:
+        try:
+            items.append(QueueItem(
+                request=request_from_dict(entry["request"]),
+                source=str(entry.get("source") or ""),
+                title=str(entry.get("title") or ""),
+            ))
+        except (KeyError, TypeError, ValueError):
+            log.warning("Elemento de la cola descartado: %r", entry, exc_info=True)
+    return items
