@@ -10,3 +10,6 @@ dist/
 
 # FFmpeg portable (binarios grandes, cada usuario pone el suyo)
 bin/
+
+# Registros
+media_downloader.log*

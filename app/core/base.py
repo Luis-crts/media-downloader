@@ -34,6 +34,7 @@ class DownloadStage(Enum):
     ANALYZING = "analyzing"
     DOWNLOADING = "downloading"
     PROCESSING = "processing"
+    PAUSED = "paused"
     ITEM_DONE = "item_done"
 
 
@@ -46,6 +47,8 @@ class DownloadRequest:
     quality: int | None = None                 # altura máxima (p. ej. 720); None = la mejor
     headers: dict[str, str] = field(default_factory=dict)  # User-Agent, Referer…
     filename: str | None = None                # nombre de salida sin extensión (opcional)
+    subtitles: bool = False                    # descargar e incrustar subtítulos (solo video)
+    subtitle_langs: tuple[str, ...] = ("es", "en")  # códigos de idioma; ("all",) = todos
 
 
 @dataclass(frozen=True)
@@ -167,11 +170,13 @@ class BaseDownloader(ABC):
         request: DownloadRequest,
         on_progress: ProgressCallback,
         cancel_event: threading.Event | None = None,
+        pause_event: threading.Event | None = None,
     ) -> DownloadResult:
         """Descarga de forma bloqueante (llamar desde un hilo secundario).
 
         Debe lanzar subclases de ``DownloaderError`` ante cualquier fallo y
-        ``DownloadCancelledError`` si ``cancel_event`` se activa.
+        ``DownloadCancelledError`` si ``cancel_event`` se activa. Mientras
+        ``pause_event`` esté activo, la descarga debe detenerse sin perder progreso.
         """
 
     def list_qualities(self, request: DownloadRequest) -> list[QualityOption]:

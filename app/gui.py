@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from app import __version__
-from app.paths import resource_path
+from app.paths import log_file_path, resource_path
 from app.core import (
     DownloadCancelledError,
     DownloaderError,
@@ -70,7 +70,8 @@ def format_eta(seconds: float | None) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
-def open_folder(path: Path) -> None:
+def open_path(path: Path) -> None:
+    """Abre una carpeta o un archivo con la aplicación predeterminada del sistema."""
     if sys.platform == "win32":
         os.startfile(path)  # noqa: S606
     elif sys.platform == "darwin":
@@ -117,6 +118,9 @@ class DownloaderApp(ctk.CTk):
 
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cancel_event = threading.Event()
+        self._pause_event = threading.Event()   # activo = descarga en pausa
+        self._downloading = False
+        self._last_stage: DownloadStage | None = None
         self._worker: threading.Thread | None = None
         self._indeterminate = False
         # Calidades analizadas: etiqueta → altura máxima (None = automática), y para qué URL.
@@ -134,6 +138,8 @@ class DownloaderApp(ctk.CTk):
         self.user_agent = ctk.StringVar(value=self._settings.get("user_agent") or default_user_agent())
         self.referer = ctk.StringVar()
         self.filename = ctk.StringVar()
+        self.subtitles = ctk.BooleanVar(value=self._settings.get("subtitles", False))
+        self.subtitle_langs = ctk.StringVar(value=self._settings.get("subtitle_langs", "es, en"))
 
         self._build_header()
         self._build_input_card()
@@ -143,6 +149,7 @@ class DownloaderApp(ctk.CTk):
         self._build_log()
 
         self._on_type_change(self.download_type.get())
+        self._on_subtitles_toggle()
         self._check_dependencies()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(POLL_MS, self._poll_events)
@@ -220,15 +227,32 @@ class DownloaderApp(ctk.CTk):
         )
         self.analyze_button.grid(row=2, column=2, padx=14, pady=8)
 
+        # Subtítulos: solo para video. Se incrustan en el MP4 y se guarda también el .srt.
+        self.subtitles_label = ctk.CTkLabel(card, text="Subtítulos")
+        self.subtitles_label.grid(row=3, column=0, sticky="w", **pad)
+        self.subtitles_row = ctk.CTkFrame(card, fg_color="transparent")
+        self.subtitles_row.grid(row=3, column=1, columnspan=2, sticky="ew", pady=4, padx=(0, 14))
+        self.subtitles_row.grid_columnconfigure(2, weight=1)
+        ctk.CTkCheckBox(
+            self.subtitles_row, text="Descargar e incrustar (incluye automáticos)",
+            variable=self.subtitles, command=self._on_subtitles_toggle,
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(self.subtitles_row, text="Idiomas").grid(row=0, column=1, padx=(16, 6))
+        self.subtitle_langs_entry = ctk.CTkEntry(
+            self.subtitles_row, textvariable=self.subtitle_langs, height=30, width=140,
+            placeholder_text="es, en  o  all",
+        )
+        self.subtitle_langs_entry.grid(row=0, column=2, sticky="w")
+
         ctk.CTkCheckBox(
             card, text="Descargar lista completa", variable=self.allow_playlist,
-        ).grid(row=3, column=1, sticky="w", pady=(0, 8))
+        ).grid(row=4, column=1, sticky="w", pady=(4, 8))
 
-        ctk.CTkLabel(card, text="Destino").grid(row=4, column=0, sticky="w", **pad)
+        ctk.CTkLabel(card, text="Destino").grid(row=5, column=0, sticky="w", **pad)
         folder = ctk.CTkEntry(card, textvariable=self.output_dir, height=34, state="readonly")
-        folder.grid(row=4, column=1, sticky="ew", pady=(8, 14))
+        folder.grid(row=5, column=1, sticky="ew", pady=(8, 14))
         buttons = ctk.CTkFrame(card, fg_color="transparent")
-        buttons.grid(row=4, column=2, padx=14, pady=(8, 14))
+        buttons.grid(row=5, column=2, padx=14, pady=(8, 14))
         ctk.CTkButton(buttons, text="Cambiar…", width=80, command=self._choose_folder).pack(
             side="left"
         )
@@ -315,16 +339,33 @@ class DownloaderApp(ctk.CTk):
             command=self._start_download,
         )
         self.download_button.grid(row=0, column=0, sticky="ew")
+        self.pause_button = ctk.CTkButton(
+            bar, text="Pausar", height=42, width=120, state="disabled",
+            fg_color=("#d68910", "#b9770e"), hover_color=("#b9770e", "#9c640c"),
+            command=self._toggle_pause,
+        )
+        self.pause_button.grid(row=0, column=1, padx=(10, 0))
         self.cancel_button = ctk.CTkButton(
             bar, text="Cancelar", height=42, width=120, state="disabled",
             fg_color=("#c0392b", "#a93226"), hover_color=("#a93226", "#922b21"),
             command=self._cancel_download,
         )
-        self.cancel_button.grid(row=0, column=1, padx=(10, 0))
+        self.cancel_button.grid(row=0, column=2, padx=(10, 0))
 
     def _build_log(self) -> None:
-        self.log_box = ctk.CTkTextbox(self.body, height=110, corner_radius=12, state="disabled")
-        self.log_box.grid(row=ROW_LOG, column=0, sticky="nsew", padx=20, pady=(0, 18))
+        frame = ctk.CTkFrame(self.body, fg_color="transparent")
+        frame.grid(row=ROW_LOG, column=0, sticky="nsew", padx=20, pady=(0, 18))
+        frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            frame, text="Actividad", font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ctk.CTkButton(
+            frame, text="Abrir archivo de logs", width=150, height=28,
+            fg_color="transparent", border_width=1, text_color=("gray10", "gray90"),
+            command=self._open_log_file,
+        ).grid(row=0, column=1, sticky="e", pady=(0, 4))
+        self.log_box = ctk.CTkTextbox(frame, height=110, corner_radius=12, state="disabled")
+        self.log_box.grid(row=1, column=0, columnspan=2, sticky="nsew")
 
     # ------------------------------------------------------------- acciones
     def _change_appearance(self, label: str) -> None:
@@ -344,7 +385,10 @@ class DownloaderApp(ctk.CTk):
 
     def _on_type_change(self, label: str) -> None:
         download_type = TYPE_BY_LABEL[label]
-        quality_widgets = (self.quality_label, self.quality_menu, self.analyze_button)
+        quality_widgets = (
+            self.quality_label, self.quality_menu, self.analyze_button,
+            self.subtitles_label, self.subtitles_row,
+        )
         for widget in quality_widgets:
             if download_type.is_video:
                 widget.grid()
@@ -354,6 +398,19 @@ class DownloaderApp(ctk.CTk):
             self.web_card.grid()
         else:
             self.web_card.grid_remove()
+
+    def _on_subtitles_toggle(self) -> None:
+        self.subtitle_langs_entry.configure(state="normal" if self.subtitles.get() else "disabled")
+
+    def _open_log_file(self) -> None:
+        path = log_file_path()
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        try:
+            path.touch(exist_ok=True)
+            open_path(path)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo abrir el archivo de logs:\n{path}\n\n{exc}")
 
     def _on_url_changed(self) -> None:
         """Las calidades analizadas dejan de valer si cambia el enlace."""
@@ -390,7 +447,14 @@ class DownloaderApp(ctk.CTk):
             quality=self._selected_quality(url) if download_type.is_video else None,
             headers=headers,
             filename=filename,
+            subtitles=download_type.is_video and self.subtitles.get(),
+            subtitle_langs=self._parse_subtitle_langs(),
         )
+
+    def _parse_subtitle_langs(self) -> tuple[str, ...]:
+        raw = self.subtitle_langs.get().replace(";", ",").replace(" ", ",")
+        codes = tuple(code for code in (c.strip().lower() for c in raw.split(",")) if code)
+        return codes or ("es", "en")
 
     def _start_analyze(self) -> None:
         if self._worker and self._worker.is_alive():
@@ -430,7 +494,7 @@ class DownloaderApp(ctk.CTk):
     def _open_output_dir(self) -> None:
         path = Path(self.output_dir.get())
         if path.is_dir():
-            open_folder(path)
+            open_path(path)
         else:
             messagebox.showinfo(APP_NAME, "La carpeta aún no existe; se creará al descargar.")
 
@@ -460,6 +524,8 @@ class DownloaderApp(ctk.CTk):
             output_dir=str(request.output_dir),
             download_type=request.download_type.value,
             allow_playlist=request.allow_playlist,
+            subtitles=self.subtitles.get(),
+            subtitle_langs=self.subtitle_langs.get(),
         )
         if self.user_agent.get().strip() not in ("", default_user_agent()):
             self._settings["user_agent"] = self.user_agent.get().strip()
@@ -468,9 +534,12 @@ class DownloaderApp(ctk.CTk):
         save_settings(self._settings)
 
         self._cancel_event.clear()
+        self._pause_event.clear()
         self._set_running(True)
         self._reset_progress()
         quality = f" · ≤{request.quality}p" if request.quality else ""
+        if request.subtitles:
+            quality += f" · subtítulos {','.join(request.subtitle_langs)}"
         self._log(f"→ {request.download_type.value}{quality} [{downloader.name}]: {request.url}")
         self._worker = threading.Thread(
             target=self._run_download, args=(downloader, request), daemon=True
@@ -481,7 +550,10 @@ class DownloaderApp(ctk.CTk):
         """Se ejecuta en el hilo secundario: nunca toca widgets directamente."""
         try:
             result = downloader.download(
-                request, lambda info: self._events.put(("progress", info)), self._cancel_event
+                request,
+                lambda info: self._events.put(("progress", info)),
+                self._cancel_event,
+                self._pause_event,
             )
             self._events.put(("done", result))
         except DownloadCancelledError:
@@ -493,8 +565,31 @@ class DownloaderApp(ctk.CTk):
             log.exception("Error inesperado durante la descarga")
             self._events.put(("error", DownloaderError(f"Error inesperado: {exc}")))
 
+    def _toggle_pause(self) -> None:
+        if not self._downloading:
+            return
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            self.pause_button.configure(text="Pausar")
+            self.status_label.configure(text="Reanudando…")
+            self._log("▶ Descarga reanudada")
+            log.info("Usuario: reanudar")
+        else:
+            self._pause_event.set()
+            self.pause_button.configure(text="Reanudar")
+            self._set_indeterminate(False)
+            self.speed_label.configure(text="Velocidad: —")
+            self.eta_label.configure(text="Restante: —")
+            if self._last_stage is DownloadStage.PROCESSING:
+                self.status_label.configure(text="Se pausará al terminar el paso de FFmpeg en curso…")
+            else:
+                self.status_label.configure(text="En pausa · lo ya descargado se conserva")
+            self._log("⏸ Descarga en pausa")
+            log.info("Usuario: pausar")
+
     def _cancel_download(self) -> None:
         self._cancel_event.set()
+        self._pause_event.clear()
         self.cancel_button.configure(state="disabled")
         self.status_label.configure(text="Cancelando…")
 
@@ -520,6 +615,12 @@ class DownloaderApp(ctk.CTk):
         self.after(POLL_MS, self._poll_events)
 
     def _apply_progress(self, p: ProgressInfo) -> None:
+        if p.stage is DownloadStage.PAUSED:
+            self.status_label.configure(text="En pausa · lo ya descargado se conserva")
+            return
+        if self._pause_event.is_set() and p.stage is not DownloadStage.ITEM_DONE:
+            return   # hilos de segmentos que informan antes de detenerse
+        self._last_stage = p.stage
         position = ""
         if p.item_index and p.item_count and p.item_count > 1:
             position = f"[{p.item_index}/{p.item_count}] "
@@ -557,8 +658,8 @@ class DownloaderApp(ctk.CTk):
                 self._log(f"✖ {error}")
             messagebox.showwarning(
                 APP_NAME,
-                f"{summary}\n\n{len(result.failed)} elemento(s) no se pudieron descargar. "
-                "Revisa el registro para más detalles.",
+                f"{summary}\n\nHubo {len(result.failed)} error(es) durante la descarga. "
+                "Revisa el archivo de logs para más detalles.",
             )
 
     def _on_qualities(self, url: str, options: list[QualityOption]) -> None:
@@ -592,14 +693,21 @@ class DownloaderApp(ctk.CTk):
         self._log("■ Descarga cancelada")
 
     def _set_running(self, running: bool, analyzing: bool = False) -> None:
+        self._downloading = running and not analyzing
+        if not running:
+            self._pause_event.clear()
+            self._last_stage = None
         busy_text = "Analizando…" if analyzing else "Descargando…"
         self.download_button.configure(
             state="disabled" if running else "normal",
             text=busy_text if running else "Descargar",
         )
         self.analyze_button.configure(state="disabled" if running else "normal")
-        # El análisis es corto y no admite cancelación.
-        self.cancel_button.configure(state="normal" if running and not analyzing else "disabled")
+        # El análisis es corto y no admite pausa ni cancelación.
+        self.cancel_button.configure(state="normal" if self._downloading else "disabled")
+        self.pause_button.configure(
+            state="normal" if self._downloading else "disabled", text="Pausar",
+        )
 
     def _set_indeterminate(self, on: bool) -> None:
         if on == self._indeterminate:
@@ -630,6 +738,7 @@ class DownloaderApp(ctk.CTk):
             if not messagebox.askyesno(APP_NAME, "Hay una descarga en curso. ¿Cancelarla y salir?"):
                 return
             self._cancel_event.set()
+            self._pause_event.clear()
         self.destroy()
 
 

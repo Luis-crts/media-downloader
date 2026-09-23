@@ -118,7 +118,7 @@ Linux en Linux. El script `build.py` encapsula todas las opciones y verifica el 
 
 Al terminar, `build.py` ejecuta `MediaDownloader --self-check`, que comprueba que el binario
 contiene iconos, temas de CustomTkinter, extractores de yt-dlp y los scripts de `yt-dlp-ejs`.
-El informe se guarda en `self-check.txt` dentro de la carpeta de datos (ver
+El informe se guarda en `self-check.txt` dentro de la carpeta de datos del usuario (ver
 [registros](#solución-de-problemas)).
 
 ### Flujo en Windows
@@ -309,12 +309,43 @@ En Linux: `curl -fsSL https://deno.land/install.sh | sh`.
    - **Video MP4**: máxima resolución disponible + mejor audio, unidos en MP4. A igualdad de
      resolución se prefiere H.264/AAC por compatibilidad; en 1440p/4K YouTube solo ofrece
      VP9/AV1, que se guarda igualmente en contenedor MP4.
-3. Elige la carpeta de destino y pulsa **Descargar**.
+3. (Video) Opcional: marca **Subtítulos** e indica los idiomas.
+4. Elige la carpeta de destino y pulsa **Descargar**.
 
 Las listas se guardan en una subcarpeta con su nombre y numeradas (`001 - Título.mp3`).
 Si un elemento de la lista no está disponible, se omite y se informa al final.
-Al cancelar quedan archivos `.part` que se reanudan si repites la descarga.
-La última carpeta, formato y tema se recuerdan en `~/.media_downloader.json`.
+La última carpeta, formato, subtítulos y tema se recuerdan en `~/.media_downloader.json`.
+
+### Pausar, reanudar y cancelar
+
+- **Pausar** detiene la recepción de datos al instante: el hilo de descarga (y, en HLS, cada
+  hilo de segmentos) queda en espera y no se piden más segmentos. Lo descargado se conserva.
+- **Reanudar** continúa desde el mismo byte o segmento. Si durante una pausa larga el
+  servidor cerró la conexión, yt-dlp la reabre automáticamente y sigue donde iba.
+- Si pausas mientras FFmpeg une o convierte el archivo, la pausa se aplica al terminar ese paso.
+- **Cancelar** (también en pausa) deja los archivos `.part`; si repites la misma descarga se
+  reanuda desde ellos.
+
+### Subtítulos
+
+Solo para *Video MP4* y *Películas / Video web*. Se descargan los subtítulos manuales y, si no
+hay, los automáticos; se convierten a **SRT**, se **incrustan** en el MP4 como pista de texto y
+se conserva también el `.srt` junto al video.
+
+- **Idiomas:** códigos separados por comas (`es, en`). Cada código incluye sus variantes
+  regionales (`es` → `es`, `es-ES`, `es-419`). `all` descarga todos.
+- Se excluyen a propósito las **traducciones automáticas** de YouTube (`es-de`, `en-fr`…:
+  decenas por video, que provocan bloqueos HTTP 429). Para pedir una concreta, escribe su
+  código completo: `es-en` = español traducido del inglés.
+- En streams HLS se usan las pistas de subtítulos del propio `.m3u8` si las hay.
+- Si un subtítulo falla, el video se descarga igualmente y el aviso queda en el log.
+
+### Cortes de red
+
+Cada petición y cada segmento HLS/DASH se reintentan hasta **20 veces**, con espera creciente
+entre intentos (1, 2, 4, 8 y luego 10 s) y un tiempo de espera de conexión de **30 s**. Los
+archivos parciales y los segmentos ya descargados se reutilizan (`continuedl`), así que un corte
+de red o un reinicio no obliga a empezar de cero.
 
 ## Películas / Video web (M3U8)
 
@@ -381,8 +412,12 @@ cambian a menudo, así que conviene cubrir cada uno con una prueba en `tests/`.
 
 ## Solución de problemas
 
-- **Registros:** `app.log` y `self-check.txt` están en
-  `%LOCALAPPDATA%\MediaDownloader\` (Windows) o `~/.local/share/media-downloader/` (Linux).
+- **Registro (`media_downloader.log`):** botón **Abrir archivo de logs** en la ventana. Se
+  guarda en la carpeta del proyecto (o junto al ejecutable) con todos los eventos, avisos y
+  errores de la app y de yt-dlp (inicio, enlace resuelto, pausas, reintentos, fin). Rota a los
+  5 MB y conserva 3 copias. Si esa carpeta no admite escritura (p. ej. en «Archivos de
+  programa»), se usa `%LOCALAPPDATA%\MediaDownloader\` o `~/.local/share/media-downloader/`,
+  donde también está `self-check.txt`.
 - **Diagnóstico rápido:** `MediaDownloader.exe --self-check` (o `python main.py --self-check`).
 - **Windows SmartScreen / antivirus:** los ejecutables de PyInstaller sin firmar pueden
   mostrar advertencias, sobre todo en `--onefile`. Usa `--onedir` o firma el ejecutable.

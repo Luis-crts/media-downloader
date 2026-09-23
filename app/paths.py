@@ -5,10 +5,13 @@
   en --onedir).
 - ``app_dir()``: carpeta donde está el ejecutable. El usuario puede dejar ahí una
   carpeta ``bin/`` con su propio FFmpeg.
-- ``user_data_dir()``: carpeta escribible para logs.
+- ``user_data_dir()``: carpeta escribible del usuario (self-check y respaldo del log).
+- ``log_file_path()``: ``media_downloader.log`` en ``app_dir()`` (o en ``user_data_dir()``
+  si ahí no se puede escribir).
 """
 from __future__ import annotations
 
+import functools
 import os
 import sys
 from pathlib import Path
@@ -36,6 +39,25 @@ def app_dir() -> Path:
 def resource_path(*parts: str) -> Path:
     """Ruta a un recurso empaquetado con ``--add-data`` / ``--add-binary``."""
     return bundle_dir().joinpath(*parts)
+
+
+LOG_FILENAME = "media_downloader.log"
+
+
+@functools.lru_cache(maxsize=1)
+def log_file_path() -> Path:
+    """Archivo de log: en la carpeta del proyecto (o junto al ejecutable).
+
+    Si esa carpeta no admite escritura (p. ej. instalada en «Archivos de programa»),
+    se usa la carpeta de datos del usuario.
+    """
+    preferred = app_dir() / LOG_FILENAME
+    try:
+        with open(preferred, "a", encoding="utf-8"):
+            pass
+        return preferred
+    except OSError:
+        return user_data_dir() / LOG_FILENAME
 
 
 def user_data_dir() -> Path:

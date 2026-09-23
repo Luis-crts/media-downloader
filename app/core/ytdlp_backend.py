@@ -54,7 +54,8 @@ _ERROR_RULES: tuple[tuple[tuple[str, ...], type[DownloaderError]], ...] = (
         "getaddrinfo failed", "failed to resolve", "name or service not known",
         "temporary failure in name resolution", "network is unreachable", "timed out",
         "connection refused", "connection reset", "no route to host", "urlopen error",
-        "remote end closed connection",
+        "remote end closed connection", "giving up after", "incompleteread",
+        "connection aborted",
     ), NetworkError),
     (("unsupported url", "is not a valid url", "incomplete youtube id", "does not exist",
       "http error 404", "no video formats found"), InvalidURLError),
@@ -68,6 +69,8 @@ _POSTPROCESSOR_LABELS = {
     "VideoRemuxer": "Ajustando contenedor MP4…",
     "FixupM3u8": "Uniendo segmentos HLS en MP4…",
     "Metadata": "Escribiendo metadatos…",
+    "SubtitlesConvertor": "Convirtiendo subtítulos a SRT…",
+    "EmbedSubtitle": "Incrustando subtítulos…",
     "EmbedThumbnail": "Insertando carátula…",
     "ThumbnailsConvertor": "Preparando carátula…",
 }
@@ -137,6 +140,33 @@ def format_options(download_type: DownloadType, quality: int | None = None) -> d
     raise ValueError(f"Tipo de descarga no soportado: {download_type}")
 
 
+def _retry_backoff(attempt: int) -> float:
+    """Espera creciente entre reintentos (1, 2, 4, 8, 10, 10… s): da tiempo a que
+    la red o el CDN se recuperen en lugar de agotar los reintentos en segundos."""
+    return float(min(2 ** attempt, 10))
+
+
+def subtitle_options(langs: tuple[str, ...]) -> dict[str, Any]:
+    """Descarga subtítulos (manuales o, si no hay, automáticos) de los idiomas pedidos."""
+    codes = [code.strip().lower() for code in langs if code.strip()]
+    if not codes or "all" in codes:
+        patterns = ["all"]
+    else:
+        # "es" → es, es-ES, es-419 (región en mayúsculas o numérica). Se excluyen las
+        # traducciones automáticas de YouTube, que usan "destino-origen" en minúsculas
+        # (es-de, en-fr…): son decenas por video y provocarían bloqueos (HTTP 429).
+        # yt-dlp compara con re.fullmatch(patrón, re.IGNORECASE), así que la región se
+        # marca como sensible a mayúsculas con el flag local (?-i:…).
+        # Una traducción concreta se puede pedir escribiendo su código: "es-en".
+        patterns = [f"{re.escape(code)}(?-i:-[A-Z]{{2}}|-[0-9]{{3}})?" for code in codes]
+    return {
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": [*patterns, "-live_chat"],
+        "subtitlesformat": "srt/vtt/best",
+    }
+
+
 def qualities_from_info(info: dict[str, Any]) -> list[QualityOption]:
     heights = {
         int(f["height"])
@@ -158,10 +188,15 @@ class YdlLogger:
         self.errors: list[str] = []
 
     def debug(self, msg: str) -> None:
-        log.debug(msg)
+        # yt-dlp envía por debug() tanto sus mensajes de depuración como los informativos
+        # ("[download] Destination: …", "[hlsnative] Total fragments: …").
+        if msg.startswith("[debug] "):
+            log.debug(msg)
+        else:
+            log.info(msg)
 
     def info(self, msg: str) -> None:
-        log.debug(msg)
+        log.info(msg)
 
     def warning(self, msg: str) -> None:
         log.warning(clean_message(msg))
@@ -172,7 +207,7 @@ class YdlLogger:
 
 
 class ProgressTracker:
-    """Adapta los hooks de yt-dlp a ``ProgressInfo`` y gestiona la cancelación."""
+    """Adapta los hooks de yt-dlp a ``ProgressInfo`` y aplica pausa y cancelación."""
 
     def __init__(
         self,
@@ -180,9 +215,13 @@ class ProgressTracker:
         cancel_event: threading.Event,
         item_count: int | None,
         title_hint: str | None = None,
+        pause_event: threading.Event | None = None,
     ):
         self._emit = emit
         self._cancel = cancel_event
+        self._pause = pause_event or threading.Event()
+        self._pause_lock = threading.Lock()   # en HLS los hooks llegan desde varios hilos
+        self._paused_announced = False
         self._item_count = item_count
         # Título a mostrar en lugar del de yt-dlp (que para un .m3u8 suele ser «master»).
         self._title_hint = title_hint
@@ -191,7 +230,27 @@ class ProgressTracker:
     def _title(self, info: dict[str, Any]) -> str:
         return self._title_hint or info.get("title") or ""
 
-    def _check_cancel(self) -> None:
+    def _checkpoint(self) -> None:
+        """Se ejecuta en cada hook de yt-dlp: aplica la pausa y la cancelación.
+
+        Pausar bloquea aquí el hilo que descarga (en HLS, cada hilo de segmentos al
+        informar de su progreso): deja de leer del socket y no pide más segmentos.
+        Lo ya descargado se conserva (.part y segmentos terminados). Si durante la pausa
+        el servidor cierra la conexión inactiva, al reanudar yt-dlp la reintenta y sigue
+        desde el byte o segmento donde iba (``continuedl`` + reintentos).
+        """
+        if self._pause.is_set() and not self._cancel.is_set():
+            with self._pause_lock:
+                if not self._paused_announced:
+                    self._paused_announced = True
+                    log.info("Descarga en pausa")
+                    self._emit(ProgressInfo(stage=DownloadStage.PAUSED, message="En pausa"))
+            while self._pause.is_set() and not self._cancel.is_set():
+                self._cancel.wait(0.25)   # vuelve al instante si se cancela
+            with self._pause_lock:
+                if self._paused_announced:
+                    self._paused_announced = False
+                    log.info("Descarga reanudada")
         if self._cancel.is_set():
             raise DownloadCancelled("Cancelado por el usuario")
 
@@ -213,7 +272,7 @@ class ProgressTracker:
         return "Descargando…"
 
     def on_download(self, d: dict[str, Any]) -> None:
-        self._check_cancel()
+        self._checkpoint()
         info = d.get("info_dict") or {}
         index, count = self._position(info)
         title = self._title(info)
@@ -239,7 +298,7 @@ class ProgressTracker:
             ))
 
     def on_postprocess(self, d: dict[str, Any]) -> None:
-        self._check_cancel()
+        self._checkpoint()
         if d["status"] != "started":
             return
         info = d.get("info_dict") or {}
@@ -280,6 +339,7 @@ class YtDlpDownloader(BaseDownloader):
         request: DownloadRequest,
         on_progress: ProgressCallback,
         cancel_event: threading.Event | None = None,
+        pause_event: threading.Event | None = None,
     ) -> DownloadResult:
         cancel_event = cancel_event or threading.Event()
         url = request.url.strip()
@@ -295,8 +355,15 @@ class YtDlpDownloader(BaseDownloader):
                 f"No se puede escribir en la carpeta de destino:\n{request.output_dir}", detail=str(exc)
             ) from exc
 
+        log.info(
+            "Descarga iniciada | fuente=%s tipo=%s calidad=%s subtítulos=%s url=%s",
+            self.name, request.download_type.name, request.quality or "máx",
+            ",".join(request.subtitle_langs) if request.subtitles else "no", url,
+        )
         on_progress(ProgressInfo(stage=DownloadStage.ANALYZING, message="Analizando enlace…"))
         target, info = self._analyze(request, on_progress)
+        if target.url != url:
+            log.info("Enlace resuelto (%s): %s", target.source, target.url)
         if cancel_event.is_set():
             raise DownloadCancelledError()
 
@@ -310,13 +377,14 @@ class YtDlpDownloader(BaseDownloader):
 
         logger = YdlLogger()
         title_hint = None if is_playlist else (request.filename or target.title)
-        tracker = ProgressTracker(on_progress, cancel_event, item_count, title_hint)
+        tracker = ProgressTracker(on_progress, cancel_event, item_count, title_hint, pause_event)
         options = self._build_options(request, target, ffmpeg, is_playlist, logger, tracker)
 
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
                 ydl.download([target.url])
         except DownloadCancelled as exc:
+            log.info("Descarga cancelada por el usuario")
             raise DownloadCancelledError() from exc
         except DownloadError as exc:
             raise translate_error(str(exc)) from exc
@@ -326,6 +394,9 @@ class YtDlpDownloader(BaseDownloader):
                 raise translate_error(logger.errors[0])
             raise DownloaderError("No se encontró contenido descargable en el enlace.")
 
+        log.info(
+            "Descarga completada: %d archivo(s), %d error(es)", len(tracker.completed), len(logger.errors)
+        )
         return DownloadResult(
             output_dir=request.output_dir, completed=tracker.completed, failed=logger.errors,
         )
@@ -347,9 +418,15 @@ class YtDlpDownloader(BaseDownloader):
             "quiet": True,
             "no_warnings": False,
             "noprogress": True,
-            "socket_timeout": 20,
-            "retries": 5,
-            "fragment_retries": 10,
+            # Robustez frente a cortes de red (evita "Giving up after N retries"):
+            "socket_timeout": 30,
+            "retries": 20,              # peticiones HTTP (archivos directos, manifiestos)
+            "fragment_retries": 20,     # cada segmento HLS/DASH
+            "extractor_retries": 5,
+            "file_access_retries": 5,
+            "retry_sleep_functions": {
+                kind: _retry_backoff for kind in ("http", "fragment", "extractor")
+            },
         }
         if headers:
             # yt-dlp las combina con sus cabeceras por defecto y las usa en TODAS las
@@ -397,10 +474,10 @@ class YtDlpDownloader(BaseDownloader):
             "outtmpl": str(self._output_template(request, target, is_playlist)),
             "ffmpeg_location": str(ffmpeg.parent),
             "noplaylist": not request.allow_playlist,
-            # En listas, un video no disponible no debe abortar el resto.
-            "ignoreerrors": "only_download" if is_playlist else False,
+            "ignoreerrors": self._ignoreerrors(request, is_playlist),
             "windowsfilenames": True,
             "overwrites": False,
+            # Reanuda archivos .part y segmentos ya descargados (tras pausa, corte o reinicio).
             "continuedl": True,
             "concurrent_fragment_downloads": self.concurrent_fragments,
             "progress_hooks": [tracker.on_download],
@@ -408,4 +485,22 @@ class YtDlpDownloader(BaseDownloader):
             "post_hooks": [tracker.on_file_done],
         }
         options.update(format_options(request.download_type, request.quality))
+
+        if request.subtitles and request.download_type.is_video:
+            options.update(subtitle_options(request.subtitle_langs))
+            postprocessors = options["postprocessors"]
+            # Antes de descargar el video: VTT → SRT. Tras el remux a MP4 (índice 0):
+            # incrustar como pista mov_text, conservando el .srt junto al archivo.
+            postprocessors.insert(0, {"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"})
+            postprocessors.insert(2, {"key": "FFmpegEmbedSubtitle", "already_have_subtitle": True})
         return options
+
+    @staticmethod
+    def _ignoreerrors(request: DownloadRequest, is_playlist: bool) -> bool | str:
+        if request.subtitles:
+            # Sin True, yt-dlp aborta el video entero si falla un subtítulo (p. ej. un 429 de
+            # YouTube). Con True solo emite un aviso; los errores reales del video siguen
+            # llegando a YdlLogger.errors y download() los convierte en excepción.
+            return True
+        # En listas, un video no disponible no debe abortar el resto.
+        return "only_download" if is_playlist else False

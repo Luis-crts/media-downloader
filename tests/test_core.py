@@ -1,10 +1,15 @@
 """Pruebas sin red del núcleo: python -m unittest discover -s tests"""
+import re
+import threading
 import unittest
 from pathlib import Path
+
+from yt_dlp.utils import DownloadCancelled
 
 from app.core import (
     AccessDeniedError,
     DownloadRequest,
+    DownloadStage,
     DownloadType,
     DRMProtectedError,
     InvalidURLError,
@@ -21,7 +26,14 @@ from app.core.extractor import (
     with_referer,
 )
 from app.core.generic import GenericDownloader
-from app.core.ytdlp_backend import YtDlpDownloader, format_options, translate_error
+from app.core.ytdlp_backend import (
+    ProgressTracker,
+    YdlLogger,
+    YtDlpDownloader,
+    format_options,
+    subtitle_options,
+    translate_error,
+)
 
 PAGE = "https://peliculas.example/ver/mi-pelicula"
 
@@ -129,6 +141,97 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn(":", template.name)
         self.assertIn("100%%", template.name)   # % escapado para outtmpl
         self.assertTrue(template.name.endswith(".%(ext)s"))
+
+
+class PauseTests(unittest.TestCase):
+    def _tracker(self, events):
+        return ProgressTracker(events.append, threading.Event(), 1, pause_event=threading.Event())
+
+    def test_pause_blocks_hook_until_resumed(self):
+        events = []
+        tracker = self._tracker(events)
+        tracker._pause.set()
+        worker = threading.Thread(target=tracker.on_download, args=({"status": "finished"},))
+        worker.start()
+        worker.join(0.5)
+        self.assertTrue(worker.is_alive(), "el hook debería quedar bloqueado en pausa")
+        self.assertEqual([e.stage for e in events], [DownloadStage.PAUSED])
+        tracker._pause.clear()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(events[-1].stage, DownloadStage.PROCESSING)
+
+    def test_cancel_while_paused_raises(self):
+        tracker = self._tracker([])
+        tracker._pause.set()
+        errors = []
+
+        def run():
+            try:
+                tracker.on_download({"status": "finished"})
+            except DownloadCancelled as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        tracker._cancel.set()
+        worker.join(2)
+        self.assertEqual(len(errors), 1)
+
+
+class OptionsTests(unittest.TestCase):
+    def _options(self, **kwargs):
+        request = DownloadRequest(
+            url="https://cdn.example/master.m3u8", output_dir=Path("out"),
+            download_type=DownloadType.WEB_VIDEO, **kwargs,
+        )
+        tracker = ProgressTracker(lambda _p: None, threading.Event(), 1)
+        return GenericDownloader()._build_options(
+            request, ResolvedMedia(url=request.url), Path("ffmpeg"), False, YdlLogger(), tracker
+        )
+
+    def test_network_robustness(self):
+        options = self._options()
+        self.assertEqual(options["retries"], 20)
+        self.assertEqual(options["fragment_retries"], 20)
+        self.assertEqual(options["socket_timeout"], 30)
+        self.assertTrue(options["continuedl"])
+        backoff = options["retry_sleep_functions"]["fragment"]
+        self.assertEqual([backoff(n) for n in range(6)], [1, 2, 4, 8, 10, 10])
+
+    def test_subtitle_languages(self):
+        patterns = subtitle_options(("es", "EN"))["subtitleslangs"]
+        self.assertEqual(patterns[-1], "-live_chat")
+
+        def selected(lang):
+            # Igual que yt_dlp.utils.orderedSet_from_options: fullmatch sin distinguir mayúsculas.
+            return any(re.compile(p, re.I).fullmatch(lang) for p in patterns[:-1])
+
+        for lang in ("es", "es-419", "es-ES", "en", "en-US"):
+            self.assertTrue(selected(lang), lang)
+        # Ni otros idiomas ni las traducciones automáticas de YouTube (destino-origen).
+        for lang in ("est", "es-de", "en-fr", "en-orig", "es-es"):
+            self.assertFalse(selected(lang), lang)
+        # Una traducción concreta se puede pedir explícitamente.
+        explicit = subtitle_options(("es-en",))["subtitleslangs"][0]
+        self.assertTrue(re.compile(explicit, re.I).fullmatch("es-en"))
+        self.assertEqual(subtitle_options(("all",))["subtitleslangs"][0], "all")
+
+    def test_subtitles_embed_after_remux_and_keep_srt(self):
+        options = self._options(subtitles=True)
+        keys = [pp["key"] for pp in options["postprocessors"]]
+        self.assertEqual(
+            keys, ["FFmpegSubtitlesConvertor", "FFmpegVideoRemuxer", "FFmpegEmbedSubtitle", "FFmpegMetadata"]
+        )
+        embed = options["postprocessors"][2]
+        self.assertTrue(embed["already_have_subtitle"])
+        # Un subtítulo que falla no debe abortar el video.
+        self.assertIs(options["ignoreerrors"], True)
+
+    def test_no_subtitles_keeps_strict_errors(self):
+        options = self._options()
+        self.assertNotIn("writesubtitles", options)
+        self.assertIs(options["ignoreerrors"], False)
 
 
 if __name__ == "__main__":

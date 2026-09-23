@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -14,25 +15,33 @@ if sys.version_info < (3, 10):
     sys.exit("Se requiere Python 3.10 o superior.")
 
 from app import __version__  # noqa: E402
-from app.paths import is_frozen, resource_path, user_data_dir  # noqa: E402
+from app.paths import is_frozen, log_file_path, resource_path, user_data_dir  # noqa: E402
 
 log = logging.getLogger("main")
 
 
 def setup_logging() -> None:
+    """Registra eventos, avisos y errores (de la app y de yt-dlp) en media_downloader.log.
+
+    Rota a los 5 MB y conserva 3 copias (media_downloader.log.1, .2, .3).
+    """
     handlers: list[logging.Handler] = [
-        RotatingFileHandler(
-            user_data_dir() / "app.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
-        )
+        RotatingFileHandler(log_file_path(), maxBytes=5_000_000, backupCount=3, encoding="utf-8")
     ]
     # Con --noconsole/--windowed, sys.stderr es None: solo se registra en archivo.
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s",
         handlers=handlers,
     )
+    # Errores no capturados en hilos secundarios (descargas) también al log.
+    threading.excepthook = lambda args: logging.getLogger("thread").error(
+        "Excepción no capturada en %s", args.thread.name if args.thread else "?",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+    log.info("=== Media Downloader %s | log: %s ===", __version__, log_file_path())
 
 
 def set_windows_app_id() -> None:
@@ -106,7 +115,7 @@ def main() -> int:
             messagebox.showerror(
                 "Media Downloader",
                 f"La aplicación se cerró por un error inesperado.\n"
-                f"Detalles en: {user_data_dir() / 'app.log'}",
+                f"Detalles en: {log_file_path()}",
             )
         except Exception:
             pass
