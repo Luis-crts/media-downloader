@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.base import FFmpegNotFoundError, NetworkError
 from app.paths import app_dir, bundle_dir
@@ -59,9 +60,19 @@ def find_js_runtime() -> str | None:
     return None
 
 
-def check_connection(host: str = "www.youtube.com", port: int = 443, timeout: float = 6) -> None:
+def check_connection(url: str = "https://www.youtube.com", timeout: float = 6) -> None:
+    """Comprueba que el host de ``url`` es alcanzable (DNS + TCP) antes de empezar."""
+    parsed = urlsplit(url if "://" in url else f"https://{url}")
+    host = parsed.hostname
+    if not host:
+        return
+    port = parsed.port or (80 if parsed.scheme == "http" else 443)
     try:
         with socket.create_connection((host, port), timeout=timeout):
             pass
     except OSError as exc:
-        raise NetworkError(detail=str(exc)) from exc
+        raise NetworkError(
+            f"No se pudo conectar con {host}.\n"
+            "Revisa tu conexión a Internet o que el enlace sea correcto.",
+            detail=str(exc),
+        ) from exc

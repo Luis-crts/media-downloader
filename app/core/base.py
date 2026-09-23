@@ -23,6 +23,11 @@ class DownloadType(Enum):
     MP3 = "Audio MP3 (mejor calidad)"
     M4A = "Audio M4A / MP4 (sin video)"
     MP4 = "Video MP4 (video + audio)"
+    WEB_VIDEO = "Películas / Video Web (M3U8 / Enlace genérico)"
+
+    @property
+    def is_video(self) -> bool:
+        return self in (DownloadType.MP4, DownloadType.WEB_VIDEO)
 
 
 class DownloadStage(Enum):
@@ -38,6 +43,25 @@ class DownloadRequest:
     output_dir: Path
     download_type: DownloadType
     allow_playlist: bool = True
+    quality: int | None = None                 # altura máxima (p. ej. 720); None = la mejor
+    headers: dict[str, str] = field(default_factory=dict)  # User-Agent, Referer…
+    filename: str | None = None                # nombre de salida sin extensión (opcional)
+
+
+@dataclass(frozen=True)
+class QualityOption:
+    label: str          # "1080p"
+    max_height: int
+
+
+@dataclass
+class ResolvedMedia:
+    """URL final que se entrega a yt-dlp, con las cabeceras necesarias para pedirla."""
+
+    url: str
+    headers: dict[str, str] = field(default_factory=dict)
+    title: str | None = None
+    source: str = "direct"     # quién la resolvió: direct, resolver:<nombre>, sniffer…
 
 
 @dataclass
@@ -103,6 +127,23 @@ class ContentUnavailableError(DownloaderError):
     default_message = "El contenido es privado, fue eliminado o no está disponible en tu región."
 
 
+class AccessDeniedError(DownloaderError):
+    title = "Acceso denegado"
+    default_message = (
+        "El servidor rechazó la descarga (HTTP 401/403).\n"
+        "Muchas webs solo sirven el video a navegadores: indica en «Referer» la página "
+        "donde se reproduce el video y usa un User-Agent de navegador."
+    )
+
+
+class DRMProtectedError(DownloaderError):
+    title = "Contenido protegido (DRM)"
+    default_message = (
+        "Este video está protegido con DRM (Widevine/PlayReady/FairPlay) y no se puede "
+        "descargar. La aplicación no elude protecciones anticopia."
+    )
+
+
 class DownloadCancelledError(DownloaderError):
     title = "Descarga cancelada"
     default_message = "La descarga fue cancelada por el usuario."
@@ -133,11 +174,20 @@ class BaseDownloader(ABC):
         ``DownloadCancelledError`` si ``cancel_event`` se activa.
         """
 
+    def list_qualities(self, request: DownloadRequest) -> list[QualityOption]:
+        """Calidades de video disponibles (de mayor a menor). Bloqueante.
+
+        Lista vacía = no se pudo determinar; se usará la mejor calidad.
+        """
+        return []
+
 
 _PROVIDERS: list[type[BaseDownloader]] = []
 
 
 def register_downloader(cls: type[BaseDownloader]) -> type[BaseDownloader]:
+    """Registra un proveedor. Se consultan en orden de registro: los específicos
+    primero y el genérico al final como respaldo."""
     _PROVIDERS.append(cls)
     return cls
 
@@ -146,11 +196,13 @@ def available_sources() -> list[str]:
     return [p.name for p in _PROVIDERS]
 
 
-def get_downloader(url: str) -> BaseDownloader:
+def get_downloader(url: str, download_type: DownloadType | None = None) -> BaseDownloader:
     url = url.strip()
     if not url:
         raise InvalidURLError("Pega un enlace antes de descargar.")
     for provider in _PROVIDERS:
+        if download_type is not None and download_type not in provider.supported_types:
+            continue
         if provider.can_handle(url):
             return provider()
     raise InvalidURLError(

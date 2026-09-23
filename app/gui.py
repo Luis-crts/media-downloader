@@ -29,7 +29,9 @@ from app.core import (
     DownloadStage,
     DownloadType,
     ProgressInfo,
+    QualityOption,
     available_sources,
+    default_user_agent,
     find_ffmpeg,
     find_js_runtime,
     get_downloader,
@@ -43,6 +45,8 @@ SETTINGS_FILE = Path.home() / ".media_downloader.json"
 POLL_MS = 100
 APPEARANCE = {"Sistema": "System", "Claro": "Light", "Oscuro": "Dark"}
 TYPE_BY_LABEL = {t.value: t for t in DownloadType}
+AUTO_QUALITY = "Máxima disponible (automática)"
+ROW_HEADER, ROW_INPUT, ROW_WEB, ROW_PROGRESS, ROW_ACTIONS, ROW_LOG = range(6)
 
 
 # --------------------------------------------------------------------------- #
@@ -102,14 +106,22 @@ class DownloaderApp(ctk.CTk):
 
         self.title(f"{APP_NAME} {__version__}")
         self._set_window_icon()
-        self.geometry("760x640")
-        self.minsize(640, 600)
+        self.geometry("800x820")
+        self.minsize(680, 520)
         self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        # Contenedor con scroll: en pantallas bajas (p. ej. 1366x768) nada queda fuera.
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        self.body.grid(row=0, column=0, sticky="nsew")
+        self.body.grid_columnconfigure(0, weight=1)
 
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._cancel_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._indeterminate = False
+        # Calidades analizadas: etiqueta → altura máxima (None = automática), y para qué URL.
+        self._quality_map: dict[str, int | None] = {AUTO_QUALITY: None}
+        self._qualities_url: str | None = None
 
         default_dir = Path(self._settings.get("output_dir") or Path.home() / "Downloads")
         self.output_dir = ctk.StringVar(value=str(default_dir))
@@ -118,13 +130,19 @@ class DownloaderApp(ctk.CTk):
             value=saved_type if saved_type in TYPE_BY_LABEL else DownloadType.MP3.value
         )
         self.allow_playlist = ctk.BooleanVar(value=self._settings.get("allow_playlist", True))
+        self.quality = ctk.StringVar(value=AUTO_QUALITY)
+        self.user_agent = ctk.StringVar(value=self._settings.get("user_agent") or default_user_agent())
+        self.referer = ctk.StringVar()
+        self.filename = ctk.StringVar()
 
         self._build_header()
         self._build_input_card()
+        self._build_web_card()
         self._build_progress_card()
         self._build_actions()
         self._build_log()
 
+        self._on_type_change(self.download_type.get())
         self._check_dependencies()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(POLL_MS, self._poll_events)
@@ -141,14 +159,14 @@ class DownloaderApp(ctk.CTk):
             log.warning("No se pudo cargar el icono de la ventana", exc_info=True)
 
     def _card(self, row: int) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self, corner_radius=12)
+        frame = ctk.CTkFrame(self.body, corner_radius=12)
         frame.grid(row=row, column=0, sticky="nsew", padx=20, pady=(0, 14))
         frame.grid_columnconfigure(1, weight=1)
         return frame
 
     def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 12))
+        header = ctk.CTkFrame(self.body, fg_color="transparent")
+        header.grid(row=ROW_HEADER, column=0, sticky="ew", padx=20, pady=(18, 12))
         header.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(header, text=APP_NAME, font=ctk.CTkFont(size=24, weight="bold")).grid(
@@ -169,16 +187,17 @@ class DownloaderApp(ctk.CTk):
         theme.grid(row=0, column=1, rowspan=2, sticky="e")
 
     def _build_input_card(self) -> None:
-        card = self._card(1)
+        card = self._card(ROW_INPUT)
         pad = {"padx": 14, "pady": 8}
 
         ctk.CTkLabel(card, text="Enlace").grid(row=0, column=0, sticky="w", **pad)
         self.url_entry = ctk.CTkEntry(
             card, height=36,
-            placeholder_text="https://www.youtube.com/watch?v=…  o  una lista de reproducción",
+            placeholder_text="YouTube, página de video, enlace .m3u8 o .mp4…",
         )
         self.url_entry.grid(row=0, column=1, sticky="ew", pady=(14, 8))
         self.url_entry.bind("<Return>", lambda _e: self._start_download())
+        self.url_entry.bind("<KeyRelease>", lambda _e: self._on_url_changed())
         ctk.CTkButton(card, text="Pegar", width=80, command=self._paste_url).grid(
             row=0, column=2, padx=14, pady=(14, 8)
         )
@@ -186,17 +205,30 @@ class DownloaderApp(ctk.CTk):
         ctk.CTkLabel(card, text="Formato").grid(row=1, column=0, sticky="w", **pad)
         ctk.CTkOptionMenu(
             card, values=list(TYPE_BY_LABEL), variable=self.download_type, height=34,
-            dynamic_resizing=False,
+            dynamic_resizing=False, command=self._on_type_change,
         ).grid(row=1, column=1, sticky="ew", pady=8)
+
+        # Calidad: solo para video. «Analizar» consulta las resoluciones disponibles.
+        self.quality_label = ctk.CTkLabel(card, text="Calidad")
+        self.quality_label.grid(row=2, column=0, sticky="w", **pad)
+        self.quality_menu = ctk.CTkOptionMenu(
+            card, values=[AUTO_QUALITY], variable=self.quality, height=34, dynamic_resizing=False,
+        )
+        self.quality_menu.grid(row=2, column=1, sticky="ew", pady=8)
+        self.analyze_button = ctk.CTkButton(
+            card, text="Analizar", width=80, command=self._start_analyze,
+        )
+        self.analyze_button.grid(row=2, column=2, padx=14, pady=8)
+
         ctk.CTkCheckBox(
             card, text="Descargar lista completa", variable=self.allow_playlist,
-        ).grid(row=2, column=1, sticky="w", pady=(0, 8))
+        ).grid(row=3, column=1, sticky="w", pady=(0, 8))
 
-        ctk.CTkLabel(card, text="Destino").grid(row=3, column=0, sticky="w", **pad)
+        ctk.CTkLabel(card, text="Destino").grid(row=4, column=0, sticky="w", **pad)
         folder = ctk.CTkEntry(card, textvariable=self.output_dir, height=34, state="readonly")
-        folder.grid(row=3, column=1, sticky="ew", pady=(8, 14))
+        folder.grid(row=4, column=1, sticky="ew", pady=(8, 14))
         buttons = ctk.CTkFrame(card, fg_color="transparent")
-        buttons.grid(row=3, column=2, padx=14, pady=(8, 14))
+        buttons.grid(row=4, column=2, padx=14, pady=(8, 14))
         ctk.CTkButton(buttons, text="Cambiar…", width=80, command=self._choose_folder).pack(
             side="left"
         )
@@ -205,8 +237,49 @@ class DownloaderApp(ctk.CTk):
             text_color=("gray10", "gray90"), command=self._open_output_dir,
         ).pack(side="left", padx=(6, 0))
 
+    def _build_web_card(self) -> None:
+        """Opciones para películas / video web: cabeceras HTTP y nombre del archivo."""
+        card = self._card(ROW_WEB)
+        self.web_card = card
+        pad = {"padx": 14, "pady": 6}
+
+        ctk.CTkLabel(
+            card, text="Opciones de video web", font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=14, pady=(12, 2))
+
+        ctk.CTkLabel(card, text="User-Agent").grid(row=1, column=0, sticky="w", **pad)
+        ctk.CTkEntry(card, textvariable=self.user_agent, height=32).grid(
+            row=1, column=1, sticky="ew", pady=6
+        )
+        ctk.CTkButton(
+            card, text="Restablecer", width=80, fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"),
+            command=lambda: self.user_agent.set(default_user_agent()),
+        ).grid(row=1, column=2, padx=14, pady=6)
+
+        ctk.CTkLabel(card, text="Referer").grid(row=2, column=0, sticky="w", **pad)
+        ctk.CTkEntry(
+            card, textvariable=self.referer, height=32,
+            placeholder_text="https://pagina-donde-se-reproduce-el-video/…  (opcional)",
+        ).grid(row=2, column=1, columnspan=2, sticky="ew", pady=6, padx=(0, 14))
+
+        ctk.CTkLabel(card, text="Nombre").grid(row=3, column=0, sticky="w", **pad)
+        ctk.CTkEntry(
+            card, textvariable=self.filename, height=32,
+            placeholder_text="Nombre del archivo, sin extensión  (opcional)",
+        ).grid(row=3, column=1, columnspan=2, sticky="ew", pady=6, padx=(0, 14))
+
+        ctk.CTkLabel(
+            card, anchor="w", justify="left", text_color=("gray40", "gray65"),
+            text=(
+                "Si la web bloquea la descarga, pon en Referer la dirección de la página del "
+                "reproductor. Para enlaces .m3u8: F12 → Red → filtra «m3u8»."
+            ),
+            wraplength=680,
+        ).grid(row=4, column=0, columnspan=3, sticky="ew", padx=14, pady=(2, 12))
+
     def _build_progress_card(self) -> None:
-        card = self._card(2)
+        card = self._card(ROW_PROGRESS)
         card.grid_columnconfigure((0, 1, 2), weight=1)
 
         self.item_label = ctk.CTkLabel(
@@ -233,8 +306,8 @@ class DownloaderApp(ctk.CTk):
         self.status_label.grid(row=3, column=0, columnspan=3, sticky="ew", padx=14, pady=(4, 12))
 
     def _build_actions(self) -> None:
-        bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 14))
+        bar = ctk.CTkFrame(self.body, fg_color="transparent")
+        bar.grid(row=ROW_ACTIONS, column=0, sticky="ew", padx=20, pady=(0, 14))
         bar.grid_columnconfigure(0, weight=1)
 
         self.download_button = ctk.CTkButton(
@@ -250,9 +323,8 @@ class DownloaderApp(ctk.CTk):
         self.cancel_button.grid(row=0, column=1, padx=(10, 0))
 
     def _build_log(self) -> None:
-        self.grid_rowconfigure(4, weight=1)
-        self.log_box = ctk.CTkTextbox(self, height=110, corner_radius=12, state="disabled")
-        self.log_box.grid(row=4, column=0, sticky="nsew", padx=20, pady=(0, 18))
+        self.log_box = ctk.CTkTextbox(self.body, height=110, corner_radius=12, state="disabled")
+        self.log_box.grid(row=ROW_LOG, column=0, sticky="nsew", padx=20, pady=(0, 18))
 
     # ------------------------------------------------------------- acciones
     def _change_appearance(self, label: str) -> None:
@@ -268,6 +340,87 @@ class DownloaderApp(ctk.CTk):
             return
         self.url_entry.delete(0, "end")
         self.url_entry.insert(0, text)
+        self._on_url_changed()
+
+    def _on_type_change(self, label: str) -> None:
+        download_type = TYPE_BY_LABEL[label]
+        quality_widgets = (self.quality_label, self.quality_menu, self.analyze_button)
+        for widget in quality_widgets:
+            if download_type.is_video:
+                widget.grid()
+            else:
+                widget.grid_remove()
+        if download_type is DownloadType.WEB_VIDEO:
+            self.web_card.grid()
+        else:
+            self.web_card.grid_remove()
+
+    def _on_url_changed(self) -> None:
+        """Las calidades analizadas dejan de valer si cambia el enlace."""
+        if self._qualities_url and self.url_entry.get().strip() != self._qualities_url:
+            self._set_qualities(None, [])
+
+    def _set_qualities(self, url: str | None, options: list[QualityOption]) -> None:
+        self._qualities_url = url
+        self._quality_map = {AUTO_QUALITY: None} | {o.label: o.max_height for o in options}
+        self.quality_menu.configure(values=list(self._quality_map))
+        self.quality.set(AUTO_QUALITY)
+
+    def _selected_quality(self, url: str) -> int | None:
+        if url != self._qualities_url:
+            return None
+        return self._quality_map.get(self.quality.get())
+
+    def _build_request(self) -> DownloadRequest:
+        url = self.url_entry.get().strip()
+        download_type = TYPE_BY_LABEL[self.download_type.get()]
+        headers: dict[str, str] = {}
+        filename = None
+        if download_type is DownloadType.WEB_VIDEO:
+            if self.user_agent.get().strip():
+                headers["User-Agent"] = self.user_agent.get().strip()
+            if self.referer.get().strip():
+                headers["Referer"] = self.referer.get().strip()
+            filename = self.filename.get().strip() or None
+        return DownloadRequest(
+            url=url,
+            output_dir=Path(self.output_dir.get()),
+            download_type=download_type,
+            allow_playlist=self.allow_playlist.get(),
+            quality=self._selected_quality(url) if download_type.is_video else None,
+            headers=headers,
+            filename=filename,
+        )
+
+    def _start_analyze(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        request = self._build_request()
+        try:
+            downloader = get_downloader(request.url, request.download_type)
+        except DownloaderError as exc:
+            messagebox.showerror(exc.title, str(exc))
+            return
+        self._set_running(True, analyzing=True)
+        self._reset_progress()
+        self._set_indeterminate(True)
+        self.status_label.configure(text=f"Analizando calidades ({downloader.name})…")
+        self._worker = threading.Thread(
+            target=self._run_analyze, args=(downloader, request), daemon=True
+        )
+        self._worker.start()
+
+    def _run_analyze(self, downloader, request: DownloadRequest) -> None:
+        """Hilo secundario: consulta las calidades sin descargar nada."""
+        try:
+            options = downloader.list_qualities(request)
+            self._events.put(("qualities", (request.url, options)))
+        except DownloaderError as exc:
+            log.warning("Análisis fallido: %s | %s", exc, exc.detail)
+            self._events.put(("analyze_error", exc))
+        except Exception as exc:
+            log.exception("Error inesperado al analizar")
+            self._events.put(("analyze_error", DownloaderError(f"Error inesperado: {exc}")))
 
     def _choose_folder(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.output_dir.get(), title="Carpeta de destino")
@@ -295,14 +448,10 @@ class DownloaderApp(ctk.CTk):
     def _start_download(self) -> None:
         if self._worker and self._worker.is_alive():
             return
-        request = DownloadRequest(
-            url=self.url_entry.get().strip(),
-            output_dir=Path(self.output_dir.get()),
-            download_type=TYPE_BY_LABEL[self.download_type.get()],
-            allow_playlist=self.allow_playlist.get(),
-        )
+        request = self._build_request()
         try:
-            downloader = get_downloader(request.url)  # valida la URL antes de lanzar el hilo
+            # Valida la URL y elige el proveedor antes de lanzar el hilo.
+            downloader = get_downloader(request.url, request.download_type)
         except DownloaderError as exc:
             messagebox.showerror(exc.title, str(exc))
             return
@@ -312,12 +461,17 @@ class DownloaderApp(ctk.CTk):
             download_type=request.download_type.value,
             allow_playlist=request.allow_playlist,
         )
+        if self.user_agent.get().strip() not in ("", default_user_agent()):
+            self._settings["user_agent"] = self.user_agent.get().strip()
+        else:
+            self._settings.pop("user_agent", None)
         save_settings(self._settings)
 
         self._cancel_event.clear()
         self._set_running(True)
         self._reset_progress()
-        self._log(f"→ {request.download_type.value}: {request.url}")
+        quality = f" · ≤{request.quality}p" if request.quality else ""
+        self._log(f"→ {request.download_type.value}{quality} [{downloader.name}]: {request.url}")
         self._worker = threading.Thread(
             target=self._run_download, args=(downloader, request), daemon=True
         )
@@ -357,6 +511,10 @@ class DownloaderApp(ctk.CTk):
                     self._on_error(payload)  # type: ignore[arg-type]
                 elif kind == "cancelled":
                     self._on_cancelled()
+                elif kind == "qualities":
+                    self._on_qualities(*payload)  # type: ignore[misc]
+                elif kind == "analyze_error":
+                    self._on_error(payload)  # type: ignore[arg-type]
         except queue.Empty:
             pass
         self.after(POLL_MS, self._poll_events)
@@ -403,6 +561,19 @@ class DownloaderApp(ctk.CTk):
                 "Revisa el registro para más detalles.",
             )
 
+    def _on_qualities(self, url: str, options: list[QualityOption]) -> None:
+        self._set_running(False)
+        self._reset_progress()
+        self._set_qualities(url, options)
+        if options:
+            labels = ", ".join(o.label for o in options)
+            self.status_label.configure(text=f"Calidades disponibles: {labels}")
+            self._log(f"ℹ Calidades: {labels}")
+        else:
+            self.status_label.configure(
+                text="No se pudieron determinar calidades; se usará la máxima disponible."
+            )
+
     def _on_error(self, error: DownloaderError) -> None:
         self._set_running(False)
         self._reset_progress()
@@ -420,12 +591,15 @@ class DownloaderApp(ctk.CTk):
         )
         self._log("■ Descarga cancelada")
 
-    def _set_running(self, running: bool) -> None:
+    def _set_running(self, running: bool, analyzing: bool = False) -> None:
+        busy_text = "Analizando…" if analyzing else "Descargando…"
         self.download_button.configure(
             state="disabled" if running else "normal",
-            text="Descargando…" if running else "Descargar",
+            text=busy_text if running else "Descargar",
         )
-        self.cancel_button.configure(state="normal" if running else "disabled")
+        self.analyze_button.configure(state="disabled" if running else "normal")
+        # El análisis es corto y no admite cancelación.
+        self.cancel_button.configure(state="normal" if running and not analyzing else "disabled")
 
     def _set_indeterminate(self, on: bool) -> None:
         if on == self._indeterminate:

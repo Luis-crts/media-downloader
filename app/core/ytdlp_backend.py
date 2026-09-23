@@ -1,0 +1,411 @@
+"""Backend común basado en yt-dlp.
+
+``YtDlpDownloader`` implementa todo el flujo (validar → analizar → descargar →
+post-procesar con FFmpeg). Los proveedores concretos (YouTube, genérico/M3U8…)
+solo sobrescriben los puntos de extensión:
+
+- ``can_handle`` / ``supported_types``
+- ``_resolve``: convierte la URL del usuario en la URL que recibirá yt-dlp.
+- ``_analyze``: extracción previa (p. ej. para añadir un plan B de scraping).
+- ``concurrent_fragments``: segmentos HLS/DASH descargados en paralelo.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import threading
+from pathlib import Path
+from typing import Any
+
+import yt_dlp
+from yt_dlp.utils import DownloadCancelled, DownloadError, sanitize_filename
+
+from app.core.base import (
+    AccessDeniedError,
+    BaseDownloader,
+    ContentUnavailableError,
+    DownloadCancelledError,
+    DownloaderError,
+    DownloadRequest,
+    DownloadResult,
+    DownloadStage,
+    DownloadType,
+    DRMProtectedError,
+    FFmpegNotFoundError,
+    InvalidURLError,
+    NetworkError,
+    ProgressCallback,
+    ProgressInfo,
+    QualityOption,
+    ResolvedMedia,
+)
+from app.core.dependencies import check_connection, find_js_runtime, require_ffmpeg
+
+log = logging.getLogger(__name__)
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+# El orden importa: se evalúan de arriba abajo.
+_ERROR_RULES: tuple[tuple[tuple[str, ...], type[DownloaderError]], ...] = (
+    (("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed"), FFmpegNotFoundError),
+    (("drm protected", "drm-protected", "this video is drm"), DRMProtectedError),
+    (("http error 403", "http error 401", "403: forbidden", "401: unauthorized"), AccessDeniedError),
+    ((
+        "getaddrinfo failed", "failed to resolve", "name or service not known",
+        "temporary failure in name resolution", "network is unreachable", "timed out",
+        "connection refused", "connection reset", "no route to host", "urlopen error",
+        "remote end closed connection",
+    ), NetworkError),
+    (("unsupported url", "is not a valid url", "incomplete youtube id", "does not exist",
+      "http error 404", "no video formats found"), InvalidURLError),
+    (("unavailable", "private video", "not available", "members-only", "sign in to confirm",
+      "has been removed", "copyright", "this live event"), ContentUnavailableError),
+)
+
+_POSTPROCESSOR_LABELS = {
+    "ExtractAudio": "Convirtiendo audio…",
+    "Merger": "Uniendo video y audio…",
+    "VideoRemuxer": "Ajustando contenedor MP4…",
+    "FixupM3u8": "Uniendo segmentos HLS en MP4…",
+    "Metadata": "Escribiendo metadatos…",
+    "EmbedThumbnail": "Insertando carátula…",
+    "ThumbnailsConvertor": "Preparando carátula…",
+}
+
+
+def clean_message(message: str) -> str:
+    message = _ANSI.sub("", str(message)).strip()
+    return re.sub(r"^ERROR:\s*", "", message)
+
+
+def translate_error(message: str) -> DownloaderError:
+    """Convierte un error de yt-dlp en un error comprensible para el usuario."""
+    text = clean_message(message)
+    lower = text.lower()
+    for hints, error_cls in _ERROR_RULES:
+        if any(h in lower for h in hints):
+            if error_cls is InvalidURLError:
+                return InvalidURLError("No se encontró ningún video en ese enlace.", detail=text)
+            return error_cls(detail=text)
+    return DownloaderError(f"No se pudo completar la descarga:\n{text}", detail=text)
+
+
+def format_options(download_type: DownloadType, quality: int | None = None) -> dict[str, Any]:
+    """Opciones de formato/post-procesado de yt-dlp para cada tipo de descarga."""
+    metadata = {"key": "FFmpegMetadata", "add_metadata": True}
+    thumbnail = {"key": "EmbedThumbnail", "already_have_thumbnail": False}
+
+    if download_type is DownloadType.MP3:
+        return {
+            "format": "bestaudio/best",
+            "writethumbnail": True,
+            "postprocessors": [
+                # preferredquality "0" = VBR V0, la mejor calidad de LAME.
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"},
+                metadata,
+                thumbnail,
+            ],
+        }
+
+    if download_type is DownloadType.M4A:
+        return {
+            # YouTube casi siempre ofrece AAC nativo: se extrae sin recodificar.
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+            "writethumbnail": True,
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "m4a", "preferredquality": "192"},
+                metadata,
+                thumbnail,
+            ],
+        }
+
+    if download_type.is_video:
+        # "res:720" = la mayor resolución que no supere 720p; "res" = la máxima.
+        resolution = f"res:{quality}" if quality else "res"
+        return {
+            # bv*+ba: pistas separadas (DASH/HLS con audio aparte); b: stream ya multiplexado.
+            "format": "bv*+ba/b",
+            # A igualdad de resolución, H.264/AAC por compatibilidad.
+            "format_sort": [resolution, "fps", "vcodec:h264", "acodec:aac"],
+            "merge_output_format": "mp4",
+            "postprocessors": [
+                {"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"},
+                metadata,
+            ],
+        }
+
+    raise ValueError(f"Tipo de descarga no soportado: {download_type}")
+
+
+def qualities_from_info(info: dict[str, Any]) -> list[QualityOption]:
+    heights = {
+        int(f["height"])
+        for f in info.get("formats") or []
+        if f.get("height") and f.get("vcodec") != "none"
+    }
+    return [QualityOption(label=f"{h}p", max_height=h) for h in sorted(heights, reverse=True)]
+
+
+def literal_for_template(name: str) -> str:
+    """Convierte un texto en un fragmento literal y seguro para ``outtmpl``."""
+    return sanitize_filename(name.strip(), restricted=False).replace("%", "%%")
+
+
+class YdlLogger:
+    """Silencia la salida de consola de yt-dlp y guarda los errores."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def debug(self, msg: str) -> None:
+        log.debug(msg)
+
+    def info(self, msg: str) -> None:
+        log.debug(msg)
+
+    def warning(self, msg: str) -> None:
+        log.warning(clean_message(msg))
+
+    def error(self, msg: str) -> None:
+        self.errors.append(clean_message(msg))
+        log.error(clean_message(msg))
+
+
+class ProgressTracker:
+    """Adapta los hooks de yt-dlp a ``ProgressInfo`` y gestiona la cancelación."""
+
+    def __init__(
+        self,
+        emit: ProgressCallback,
+        cancel_event: threading.Event,
+        item_count: int | None,
+        title_hint: str | None = None,
+    ):
+        self._emit = emit
+        self._cancel = cancel_event
+        self._item_count = item_count
+        # Título a mostrar en lugar del de yt-dlp (que para un .m3u8 suele ser «master»).
+        self._title_hint = title_hint
+        self.completed: list[Path] = []
+
+    def _title(self, info: dict[str, Any]) -> str:
+        return self._title_hint or info.get("title") or ""
+
+    def _check_cancel(self) -> None:
+        if self._cancel.is_set():
+            raise DownloadCancelled("Cancelado por el usuario")
+
+    def _position(self, info: dict[str, Any]) -> tuple[int | None, int | None]:
+        index = info.get("playlist_index") or info.get("playlist_autonumber")
+        count = info.get("n_entries") or info.get("playlist_count") or self._item_count
+        return index, count
+
+    @staticmethod
+    def _stream_label(d: dict[str, Any], info: dict[str, Any]) -> str:
+        if d.get("fragment_count"):
+            return f"Descargando segmentos {d.get('fragment_index') or 0}/{d['fragment_count']}…"
+        has_video = info.get("vcodec") not in (None, "none")
+        has_audio = info.get("acodec") not in (None, "none")
+        if has_video and not has_audio:
+            return "Descargando pista de video…"
+        if has_audio and not has_video:
+            return "Descargando pista de audio…"
+        return "Descargando…"
+
+    def on_download(self, d: dict[str, Any]) -> None:
+        self._check_cancel()
+        info = d.get("info_dict") or {}
+        index, count = self._position(info)
+        title = self._title(info)
+
+        if d["status"] == "downloading":
+            done = d.get("downloaded_bytes") or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if total:
+                percent = min(done / total * 100, 100.0)
+            elif d.get("fragment_count"):
+                percent = (d.get("fragment_index") or 0) / d["fragment_count"] * 100
+            else:
+                percent = None
+            self._emit(ProgressInfo(
+                stage=DownloadStage.DOWNLOADING, title=title, message=self._stream_label(d, info),
+                percent=percent, downloaded_bytes=done, total_bytes=total,
+                speed=d.get("speed"), eta=d.get("eta"), item_index=index, item_count=count,
+            ))
+        elif d["status"] == "finished":
+            self._emit(ProgressInfo(
+                stage=DownloadStage.PROCESSING, title=title, percent=100.0,
+                message="Descarga terminada, procesando…", item_index=index, item_count=count,
+            ))
+
+    def on_postprocess(self, d: dict[str, Any]) -> None:
+        self._check_cancel()
+        if d["status"] != "started":
+            return
+        info = d.get("info_dict") or {}
+        index, count = self._position(info)
+        self._emit(ProgressInfo(
+            stage=DownloadStage.PROCESSING, title=self._title(info),
+            message=_POSTPROCESSOR_LABELS.get(d.get("postprocessor", ""), "Procesando…"),
+            item_index=index, item_count=count,
+        ))
+
+    def on_file_done(self, filepath: str) -> None:
+        path = Path(filepath)
+        self.completed.append(path)
+        self._emit(ProgressInfo(
+            stage=DownloadStage.ITEM_DONE, title=path.stem, percent=100.0,
+            message=f"Guardado: {path.name}",
+        ))
+
+
+class YtDlpDownloader(BaseDownloader):
+    """Flujo completo de descarga con yt-dlp. Ver docstring del módulo."""
+
+    concurrent_fragments = 4
+
+    # ------------------------------------------------------ puntos de extensión
+    def _resolve(self, request: DownloadRequest, on_progress: ProgressCallback) -> ResolvedMedia:
+        return ResolvedMedia(url=request.url.strip(), headers=dict(request.headers))
+
+    def _analyze(
+        self, request: DownloadRequest, on_progress: ProgressCallback
+    ) -> tuple[ResolvedMedia, dict[str, Any]]:
+        target = self._resolve(request, on_progress)
+        return target, self._probe(target, request.allow_playlist)
+
+    # ------------------------------------------------------------- API pública
+    def download(
+        self,
+        request: DownloadRequest,
+        on_progress: ProgressCallback,
+        cancel_event: threading.Event | None = None,
+    ) -> DownloadResult:
+        cancel_event = cancel_event or threading.Event()
+        url = request.url.strip()
+        if not self.can_handle(url):
+            raise InvalidURLError(f"El enlace no es compatible con la fuente {self.name}.")
+
+        ffmpeg = require_ffmpeg()
+        check_connection(url)
+        try:
+            request.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise DownloaderError(
+                f"No se puede escribir en la carpeta de destino:\n{request.output_dir}", detail=str(exc)
+            ) from exc
+
+        on_progress(ProgressInfo(stage=DownloadStage.ANALYZING, message="Analizando enlace…"))
+        target, info = self._analyze(request, on_progress)
+        if cancel_event.is_set():
+            raise DownloadCancelledError()
+
+        is_playlist = info.get("_type") == "playlist"
+        item_count = len(info.get("entries") or []) if is_playlist else 1
+        if is_playlist:
+            on_progress(ProgressInfo(
+                stage=DownloadStage.ANALYZING, title=info.get("title") or "",
+                message=f"Lista detectada: {item_count} elementos", item_count=item_count,
+            ))
+
+        logger = YdlLogger()
+        title_hint = None if is_playlist else (request.filename or target.title)
+        tracker = ProgressTracker(on_progress, cancel_event, item_count, title_hint)
+        options = self._build_options(request, target, ffmpeg, is_playlist, logger, tracker)
+
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.download([target.url])
+        except DownloadCancelled as exc:
+            raise DownloadCancelledError() from exc
+        except DownloadError as exc:
+            raise translate_error(str(exc)) from exc
+
+        if not tracker.completed:
+            if logger.errors:
+                raise translate_error(logger.errors[0])
+            raise DownloaderError("No se encontró contenido descargable en el enlace.")
+
+        return DownloadResult(
+            output_dir=request.output_dir, completed=tracker.completed, failed=logger.errors,
+        )
+
+    def list_qualities(self, request: DownloadRequest) -> list[QualityOption]:
+        url = request.url.strip()
+        if not self.can_handle(url):
+            raise InvalidURLError(f"El enlace no es compatible con la fuente {self.name}.")
+        check_connection(url)
+        _target, info = self._analyze(request, lambda _p: None)
+        if info.get("_type") == "playlist":
+            return []   # cada elemento puede tener calidades distintas
+        return qualities_from_info(info)
+
+    # ---------------------------------------------------------------- internos
+    def _base_options(self, logger: YdlLogger, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "logger": logger,
+            "quiet": True,
+            "no_warnings": False,
+            "noprogress": True,
+            "socket_timeout": 20,
+            "retries": 5,
+            "fragment_retries": 10,
+        }
+        if headers:
+            # yt-dlp las combina con sus cabeceras por defecto y las usa en TODAS las
+            # peticiones: página, manifiesto M3U8, segmentos .ts y claves AES-128.
+            options["http_headers"] = headers
+        runtime = find_js_runtime()
+        if runtime:
+            options["js_runtimes"] = {runtime: {}}
+        return options
+
+    def _probe(self, target: ResolvedMedia, allow_playlist: bool) -> dict[str, Any]:
+        """Extracción sin descargar: valida el enlace, detecta listas y calidades."""
+        options = self._base_options(YdlLogger(), target.headers) | {
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "noplaylist": not allow_playlist,
+        }
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(target.url, download=False)
+        except DownloadError as exc:
+            raise translate_error(str(exc)) from exc
+        if not info:
+            raise InvalidURLError("No se encontró ningún video en ese enlace.")
+        return info
+
+    def _output_template(self, request: DownloadRequest, target: ResolvedMedia, is_playlist: bool) -> Path:
+        out = request.output_dir
+        if is_playlist:
+            return out / "%(playlist_title)s" / "%(playlist_index)03d - %(title)s.%(ext)s"
+        name = request.filename or target.title
+        stem = literal_for_template(name) if name and name.strip() else "%(title)s"
+        return out / f"{stem}.%(ext)s"
+
+    def _build_options(
+        self,
+        request: DownloadRequest,
+        target: ResolvedMedia,
+        ffmpeg: Path,
+        is_playlist: bool,
+        logger: YdlLogger,
+        tracker: ProgressTracker,
+    ) -> dict[str, Any]:
+        options = self._base_options(logger, target.headers) | {
+            "outtmpl": str(self._output_template(request, target, is_playlist)),
+            "ffmpeg_location": str(ffmpeg.parent),
+            "noplaylist": not request.allow_playlist,
+            # En listas, un video no disponible no debe abortar el resto.
+            "ignoreerrors": "only_download" if is_playlist else False,
+            "windowsfilenames": True,
+            "overwrites": False,
+            "continuedl": True,
+            "concurrent_fragment_downloads": self.concurrent_fragments,
+            "progress_hooks": [tracker.on_download],
+            "postprocessor_hooks": [tracker.on_postprocess],
+            "post_hooks": [tracker.on_file_done],
+        }
+        options.update(format_options(request.download_type, request.quality))
+        return options

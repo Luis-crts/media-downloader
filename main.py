@@ -59,7 +59,7 @@ def _has_ejs_scripts() -> bool:
 def self_check() -> int:
     """Comprueba que el binario contiene todo lo necesario. Devuelve el código de salida."""
     from app.core import find_ffmpeg, find_js_runtime
-    from app.core.downloader import yt_dlp
+    import yt_dlp
 
     import customtkinter
 

@@ -1,9 +1,9 @@
 # Media Downloader
 
-Aplicación de escritorio (Python + CustomTkinter) para descargar música y videos de YouTube
-con **yt-dlp** y **FFmpeg**. Se distribuye como ejecutable para Windows y Linux, con acceso
-directo en el Escritorio y en el menú de aplicaciones. Está pensada para crecer con nuevas
-fuentes (p. ej. películas).
+Aplicación de escritorio (Python + CustomTkinter) para descargar música y videos de YouTube,
+y películas/videos de la web (streams **HLS/M3U8**, DASH, enlaces directos y los más de 1800
+sitios que reconoce yt-dlp), con **yt-dlp** y **FFmpeg**. Se distribuye como ejecutable para
+Windows y Linux, con acceso directo en el Escritorio y en el menú de aplicaciones.
 
 - [Estructura](#estructura)
 - [Opción 1: usar el ejecutable (usuarios)](#opción-1-usar-el-ejecutable-usuarios)
@@ -12,8 +12,9 @@ fuentes (p. ej. películas).
 - [Accesos directos](#accesos-directos)
 - [FFmpeg](#ffmpeg)
 - [Uso](#uso)
+- [Películas / Video web (M3U8)](#películas--video-web-m3u8)
 - [Solución de problemas](#solución-de-problemas)
-- [Añadir una nueva fuente](#añadir-una-nueva-fuente-p-ej-películas)
+- [Añadir una nueva fuente](#añadir-una-nueva-fuente)
 
 ## Estructura
 
@@ -36,15 +37,25 @@ App musica/
     ├── gui.py                     # Interfaz CustomTkinter (solo presentación)
     └── core/
         ├── base.py                # Contratos: BaseDownloader, modelos, errores, registro
-        ├── downloader.py          # Proveedor de YouTube (yt-dlp)
+        ├── ytdlp_backend.py       # Flujo común yt-dlp: analizar, descargar, progreso, errores
+        ├── downloader.py          # Proveedor YouTube
+        ├── generic.py             # Proveedor Web / M3U8 (respaldo para cualquier URL)
+        ├── extractor.py           # Resolvers por sitio + sniffer de páginas (HTML/iframes/JS)
         └── dependencies.py        # Detección de FFmpeg, runtime JS y conexión
+tests/test_core.py                 # Pruebas sin red (python -m unittest discover -s tests)
 ```
+
+Selección de proveedor (`get_downloader(url, tipo)`): se recorre el registro en orden y se
+usa el primero que acepta la URL **y** el tipo. YouTube va primero; `GenericDownloader` va
+último y acepta cualquier `http(s)`, así que también sirve para MP3/MP4 de Vimeo, SoundCloud,
+etc. El tipo *Películas / Video Web* siempre usa el genérico.
 
 - **`core` no importa nada de la GUI.** Puede usarse desde una CLI, una API web o tests.
 - La descarga corre en un **hilo secundario**; el progreso llega a la GUI mediante una
   `queue.Queue` que se consulta con `after()` (Tkinter no es thread-safe).
 - Los errores se traducen a excepciones propias (`InvalidURLError`, `NetworkError`,
-  `FFmpegNotFoundError`, `ContentUnavailableError`, `DownloadCancelledError`) con mensajes
+  `FFmpegNotFoundError`, `ContentUnavailableError`, `AccessDeniedError`, `DRMProtectedError`,
+  `DownloadCancelledError`) con mensajes
   listos para mostrar.
 
 ---
@@ -305,6 +316,69 @@ Si un elemento de la lista no está disponible, se omite y se informa al final.
 Al cancelar quedan archivos `.part` que se reanudan si repites la descarga.
 La última carpeta, formato y tema se recuerdan en `~/.media_downloader.json`.
 
+## Películas / Video web (M3U8)
+
+Elige **Formato → Películas / Video Web (M3U8 / Enlace genérico)**. Aparece el panel
+*Opciones de video web*:
+
+| Campo | Para qué sirve |
+|---|---|
+| **User-Agent** | Se identifica como un navegador de escritorio (valor actualizado por yt-dlp). *Restablecer* recupera el valor por defecto. |
+| **Referer** | Página donde se reproduce el video. Muchos CDN devuelven **403** si falta. |
+| **Nombre** | Nombre del archivo final (sin extensión). Si se deja vacío se usa el título de la página, el nombre de la URL o `video-AAAAMMDD-HHMMSS`. |
+
+**Calidad:** pulsa **Analizar** para ver las resoluciones del stream (p. ej. 1080p, 720p…) y
+elige una; con *Máxima disponible* se toma la mejor automáticamente. El selector también
+funciona para *Video MP4* de YouTube. Si cambias el enlace, se vuelve a *automática*.
+
+**Qué se puede pegar:**
+1. Un enlace directo `.m3u8`, `.mpd`, `.mp4`, `.webm`… yt-dlp descarga los segmentos
+   `.ts`/`.m4s` en paralelo (8 a la vez), con las cabeceras indicadas en **todas** las
+   peticiones (manifiesto, segmentos y claves AES-128), y FFmpeg los une en un `.mp4` sin
+   recodificar.
+2. La página de un sitio que yt-dlp reconozca (más de 1800).
+3. Cualquier otra página con un reproductor: si yt-dlp no la reconoce, el *sniffer* de
+   `extractor.py` busca el video en el HTML (`<video>/<source>`, configuraciones de
+   JWPlayer/Clappr/Video.js, JSON con `\/` escapados, JavaScript empaquetado con
+   `eval(function(p,a,c,k,e,d)…)`) y entra en los iframes (2 niveles), enviando como Referer
+   la página que contiene el reproductor, como haría un navegador.
+
+**Si no encuentra el video:** ábrelo en el navegador, pulsa F12 → pestaña *Red*, reproduce
+el video y filtra por `m3u8`. Copia esa URL en *Enlace* y la dirección de la página en
+*Referer*.
+
+**Límites:**
+- **DRM:** los servicios de suscripción (Netflix, Disney+, Prime Video…) cifran con
+  Widevine/PlayReady/FairPlay. La app lo detecta y muestra *Contenido protegido (DRM)*;
+  no intenta eludirlo.
+- Los enlaces de stream suelen llevar un token que caduca: si falla con 403/404 un rato
+  después, copia de nuevo la URL.
+- Algunas webs exigen cookies de sesión; hoy no están soportadas.
+
+Descarga solo contenido que tengas derecho a guardar (dominio público, licencias libres,
+tus propios videos, o cuando el sitio lo permita).
+
+### Añadir un resolver para un servidor concreto
+
+Si un sitio necesita lógica propia (p. ej. llamar a una API para obtener el `.m3u8`), crea un
+`SiteResolver` en `app/core/extractor.py` o en su propio módulo. El docstring de
+`extractor.py` trae una plantilla completa:
+
+```python
+@register_resolver
+class MiServidorResolver(SiteResolver):
+    name = "MiServidor"
+    domains = ("miservidor.example",)
+
+    def resolve(self, url, headers):
+        page = fetch_page(url, headers)
+        ...
+        return ResolvedMedia(url=m3u8, headers=with_referer(headers, page.url), title=page_title(page.text))
+```
+
+Los resolvers se ejecutan antes que yt-dlp y el sniffer. Mantenlos pequeños: los sitios
+cambian a menudo, así que conviene cubrir cada uno con una prueba en `tests/`.
+
 ## Solución de problemas
 
 - **Registros:** `app.log` y `self-check.txt` están en
@@ -314,17 +388,21 @@ La última carpeta, formato y tema se recuerdan en `~/.media_downloader.json`.
   mostrar advertencias, sobre todo en `--onefile`. Usa `--onedir` o firma el ejecutable.
 - **Linux, "no se puede abrir el lanzador":** haz clic derecho sobre el icono del Escritorio →
   *Permitir ejecutar* (algunos entornos lo exigen además del `chmod +x`).
+- **«Acceso denegado» (403) en video web:** revisa el *Referer* (debe ser la página del
+  reproductor, a veces la del iframe) y que el enlace no haya caducado.
 - **Las descargas de YouTube empiezan a fallar:** actualiza yt-dlp y vuelve a compilar:
 
 ```bash
 pip install -U "yt-dlp[default]"
 ```
 
-## Añadir una nueva fuente (p. ej. películas)
-1. Crea un módulo junto a `app/core/downloader.py` (o en `app/core/providers/`).
-2. Hereda de `BaseDownloader` e implementa `can_handle(url)` y
-   `download(request, on_progress, cancel_event)`.
-3. Decora la clase con `@register_downloader` e impórtala en `app/core/__init__.py`.
+## Añadir una nueva fuente
+1. Crea un módulo junto a `app/core/downloader.py`.
+2. Si usa yt-dlp, hereda de `YtDlpDownloader` y sobrescribe solo `can_handle`,
+   `supported_types` y, si hace falta, `_resolve`/`_analyze` (como `generic.py`). Si no,
+   hereda de `BaseDownloader` e implementa `download(...)` y opcionalmente `list_qualities(...)`.
+3. Decora la clase con `@register_downloader` e impórtala en `app/core/__init__.py`
+   **antes** de `generic` (el genérico debe quedar el último).
 
 La GUI llama a `get_downloader(url)`, que elige el proveedor adecuado; no hace falta tocarla
 salvo para añadir opciones nuevas.
