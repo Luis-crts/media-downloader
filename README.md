@@ -6,7 +6,7 @@ sitios que reconoce yt-dlp), con **yt-dlp** y **FFmpeg**. Se distribuye como eje
 Windows y Linux, con acceso directo en el Escritorio y en el menú de aplicaciones.
 
 - [Estructura](#estructura)
-- [Opción 1: usar el ejecutable (usuarios)](#opción-1-usar-el-ejecutable-usuarios)
+- [Opción 1: instalar (usuarios)](#opción-1-instalar-usuarios)
 - [Opción 2: ejecutar desde el código (desarrollo)](#opción-2-ejecutar-desde-el-código-desarrollo)
 - [Compilar el ejecutable](#compilar-el-ejecutable)
 - [Accesos directos](#accesos-directos)
@@ -28,6 +28,8 @@ App musica/
 ├── assets/                        # icon.ico (Windows), icon.png (Linux), icon_source.png (original)
 ├── bin/                           # (opcional) ffmpeg + ffprobe portables
 ├── packaging/make_icon.py         # Genera icon.ico / icon.png desde icon_source.png
+├── packaging/windows/             # Instalador de Windows (Inno Setup) + aviso de FFmpeg
+├── packaging/linux/install.sh     # Instalador de Linux (FFmpeg, ~/.local/bin, .desktop)
 ├── scripts/
 │   ├── install_shortcuts_windows.ps1   # Crea los .lnk (Escritorio + Menú Inicio)
 │   ├── install_shortcuts_windows.bat   # Lo mismo, con doble clic
@@ -65,14 +67,25 @@ etc. El tipo *Películas / Video Web* siempre usa el genérico.
 
 ---
 
-## Opción 1: usar el ejecutable (usuarios)
+## Opción 1: instalar (usuarios)
 
-1. Descarga la compilación de tu sistema desde la pestaña **Actions** del repositorio
-   (artefactos `MediaDownloader-windows` o `MediaDownloader-linux`) o compílala tú
-   ([ver más abajo](#compilar-el-ejecutable)).
-2. Instala [FFmpeg](#ffmpeg) (salvo que la compilación lo lleve embebido).
-3. Crea los [accesos directos](#accesos-directos).
-4. Abre **Media Downloader** desde el Escritorio o el menú. No se abre ninguna terminal.
+Descarga el instalador de tu sistema desde **Releases** del repositorio:
+
+| Sistema | Archivo | Cómo se instala |
+|---|---|---|
+| Windows 10/11 (64 bits) | `MediaDownloader_Setup.exe` | Doble clic y seguir el asistente. **Incluye FFmpeg**. |
+| Linux x86_64 | `MediaDownloader-linux.tar.gz` | `tar -xzf MediaDownloader-linux.tar.gz && ./MediaDownloader-linux/install.sh` |
+
+**Windows:** se instala por usuario en `%LOCALAPPDATA%\Programs\MediaDownloader` (sin permisos de
+administrador; el asistente permite elegir *Archivos de programa* para todos los usuarios), crea
+los accesos directos del Menú Inicio y del Escritorio con el icono de la app y registra el
+desinstalador en *Configuración → Aplicaciones*. Al desinstalar pregunta si borrar también la
+configuración y la cola guardada; los archivos descargados nunca se tocan.
+
+**Linux:** `install.sh` instala FFmpeg con el gestor de paquetes (apt, dnf, pacman o zypper),
+copia la app a `~/.local/share/media-downloader/app`, crea el comando
+`~/.local/bin/MediaDownloader` y los lanzadores del menú y del Escritorio. Opciones: `-y` (sin
+preguntas), `--no-desktop`, `--no-ffmpeg`, `--uninstall` y `--uninstall --purge`.
 
 ## Opción 2: ejecutar desde el código (desarrollo)
 
@@ -112,6 +125,34 @@ python3 -m venv .venv
 
 PyInstaller **no compila de forma cruzada**: el `.exe` se genera en Windows y el binario de
 Linux en Linux. El script `build.py` encapsula todas las opciones y verifica el resultado.
+
+### Instalador de Windows
+
+```bash
+python build.py --installer
+```
+
+Genera `dist/MediaDownloader_Setup.exe` con **Inno Setup 6**
+(`winget install --id JRSoftware.InnoSetup -e`) a partir de
+`packaging/windows/MediaDownloader.iss`. Incluye la carpeta de PyInstaller y un FFmpeg
+**LGPL** (compilación *shared* de BtbN: `ffmpeg`/`ffprobe` comparten las DLL), que se descarga
+la primera vez en `build/ffmpeg/`; con `--ffmpeg-dir CARPETA` se usa otro. FFmpeg queda en
+`bin\` junto al ejecutable, que es el primer sitio donde la app lo busca.
+
+### Publicación automática
+
+Al subir una etiqueta `vX.Y.Z`, GitHub Actions compila en Windows y Linux, **prueba los dos
+instaladores** (instalación silenciosa, ejecución con el FFmpeg incluido/instalado, descarga
+HLS real en Linux y desinstalación) y, solo si todo pasa, publica `MediaDownloader_Setup.exe`
+y `MediaDownloader-linux.tar.gz` en el Release con las notas de `packaging/RELEASE_NOTES.md`.
+
+```bash
+git tag -a v0.9.0 -m "Media Downloader 0.9.0"
+```
+
+```bash
+git push origin v0.9.0
+```
 
 ### Modos
 

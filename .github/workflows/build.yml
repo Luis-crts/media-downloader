@@ -8,14 +8,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        # Ubuntu 22.04: el binario enlaza contra una glibc antigua y funciona en distros más nuevas.
-        os: [windows-latest, ubuntu-22.04]
-    runs-on: ${{ matrix.os }}
-
+  # ----------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
@@ -25,31 +20,117 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
 
-      - name: Dependencias del sistema (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libtk8.6 libtcl8.6
-
-      - name: Dependencias de Python
-        run: python -m pip install -r requirements-dev.txt
+      - name: Dependencias
+        run: |
+          python -m pip install -r requirements-dev.txt
+          choco install innosetup -y --no-progress
 
       - name: Pruebas unitarias
         run: python -m unittest discover -s tests -v
 
-      - name: Compilar y verificar (--self-check)
-        run: python build.py
+      - name: Ejecutable + instalador (incluye FFmpeg LGPL)
+        run: python build.py --installer
 
-      - name: Empaquetar (Linux, conserva permisos de ejecución)
-        if: runner.os == 'Linux'
-        run: tar -czf MediaDownloader-linux.tar.gz -C dist MediaDownloader
+      - name: Probar el instalador (instalar, ejecutar sin FFmpeg en el PATH, desinstalar)
+        shell: pwsh
+        run: |
+          $setup = "dist\MediaDownloader_Setup.exe"
+          Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/TASKS=desktopicon' -Wait
+          $app = Join-Path $env:LOCALAPPDATA 'Programs\MediaDownloader'
+          if (-not (Test-Path "$app\bin\ffmpeg.exe")) { throw "FFmpeg no se instaló" }
+          if (-not (Test-Path (Join-Path ([Environment]::GetFolderPath('Programs')) 'Media Downloader.lnk'))) { throw "Falta el acceso directo del Menú Inicio" }
+          $psi = [Diagnostics.ProcessStartInfo]::new("$app\MediaDownloader.exe", '--self-check')
+          $psi.UseShellExecute = $false
+          $psi.EnvironmentVariables['PATH'] = "$env:SystemRoot\System32;$env:SystemRoot"
+          $proc = [Diagnostics.Process]::Start($psi); $proc.WaitForExit()
+          $report = Get-Content "$env:LOCALAPPDATA\MediaDownloader\self-check.txt" -Raw
+          Write-Output $report
+          if ($proc.ExitCode -ne 0 -or $report -notmatch [regex]::Escape("ffmpeg: $app\bin\ffmpeg.exe")) { throw "La app instalada no usa el FFmpeg incluido" }
+          Start-Process "$app\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+          Start-Sleep 3
+          if (Test-Path "$app\MediaDownloader.exe") { throw "La desinstalación dejó archivos" }
 
       - uses: actions/upload-artifact@v7
-        if: runner.os == 'Linux'
+        with:
+          name: MediaDownloader-windows-setup
+          path: dist/MediaDownloader_Setup.exe
+
+  # ----------------------------------------------------------------------------
+  linux:
+    # Ubuntu 22.04: el binario enlaza contra una glibc antigua y funciona en distros más nuevas.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Dependencias
+        run: |
+          sudo apt-get update && sudo apt-get install -y libtk8.6 libtcl8.6
+          python -m pip install -r requirements-dev.txt
+
+      - name: Pruebas unitarias
+        run: python -m unittest discover -s tests -v
+
+      - name: Ejecutable
+        run: python build.py
+
+      - name: Paquete (aplicación + install.sh)
+        run: |
+          mkdir -p pkg/MediaDownloader-linux
+          cp -a dist/MediaDownloader pkg/MediaDownloader-linux/
+          cp packaging/linux/install.sh pkg/MediaDownloader-linux/
+          chmod +x pkg/MediaDownloader-linux/install.sh
+          tar -czf MediaDownloader-linux.tar.gz -C pkg MediaDownloader-linux
+
+      - name: Probar install.sh (instalar con FFmpeg, ejecutar, desinstalar)
+        run: |
+          mkdir -p /tmp/prueba && tar -xzf MediaDownloader-linux.tar.gz -C /tmp/prueba
+          /tmp/prueba/MediaDownloader-linux/install.sh -y --no-desktop
+          test -x "$HOME/.local/bin/MediaDownloader"
+          test -f "$HOME/.local/share/applications/media-downloader.desktop"
+          "$HOME/.local/bin/MediaDownloader" --self-check
+          cat "$HOME/.local/share/media-downloader/self-check.txt"
+          grep -q "resultado: OK" "$HOME/.local/share/media-downloader/self-check.txt"
+          ! grep -q "ffmpeg: NO ENCONTRADO" "$HOME/.local/share/media-downloader/self-check.txt"
+          # Descarga HLS real: prueba el FFmpeg instalado por install.sh (unir + verificar).
+          "$HOME/.local/bin/MediaDownloader" --test-download https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8 \
+            || "$HOME/.local/bin/MediaDownloader" --test-download https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+          cat "$HOME/.local/share/media-downloader/self-check.txt"
+          /tmp/prueba/MediaDownloader-linux/install.sh --uninstall --purge
+          test ! -e "$HOME/.local/bin/MediaDownloader"
+
+      - uses: actions/upload-artifact@v7
         with:
           name: MediaDownloader-linux
           path: MediaDownloader-linux.tar.gz
 
-      - uses: actions/upload-artifact@v7
-        if: runner.os == 'Windows'
+  # ----------------------------------------------------------------------------
+  release:
+    # Solo en etiquetas vX.Y.Z y solo si ambos instaladores pasaron sus pruebas.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
         with:
-          name: MediaDownloader-windows
-          path: dist/MediaDownloader/
+          path: assets
+          merge-multiple: true
+
+      - name: Publicar en GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la assets
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Media Downloader ${TAG#v}" --notes-file packaging/RELEASE_NOTES.md --verify-tag
+          gh release upload "$TAG" assets/MediaDownloader_Setup.exe assets/MediaDownloader-linux.tar.gz --clobber
