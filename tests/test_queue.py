@@ -99,6 +99,41 @@ class ReorderTests(unittest.TestCase):
         )
 
 
+class RetryTests(unittest.TestCase):
+    def setUp(self):
+        self.queue = DownloadQueue()
+        self.failed = self.queue.add(request("https://cdn.example/master.m3u8", DownloadType.WEB_VIDEO))
+        self.failed.status = ItemStatus.FAILED
+        self.failed.title = "video-20260923-202550"
+        self.failed.error = "Archivo final dañado"
+        self.pending = self.queue.add(request("https://youtu.be/b"))
+
+    def test_retry_goes_to_the_end_as_pending_with_same_file_name(self):
+        self.assertTrue(self.queue.retry(self.failed.id))
+        self.assertEqual([i.id for i in self.queue.items], [self.pending.id, self.failed.id])
+        self.assertIs(self.failed.status, ItemStatus.PENDING)
+        self.assertEqual(self.failed.error, "")
+        # Mismo nombre que el primer intento → yt-dlp reanuda desde su .part.
+        self.assertEqual(self.failed.request.filename, "video-20260923-202550")
+
+    def test_user_file_name_is_kept(self):
+        self.failed.request = request("https://cdn.example/x.m3u8", filename="Mi película")
+        self.queue.retry(self.failed.id)
+        self.assertEqual(self.failed.request.filename, "Mi película")
+
+    def test_playlist_title_is_not_frozen(self):
+        self.failed.title = "[3/12] Tercera canción"
+        self.queue.retry(self.failed.id)
+        self.assertIsNone(self.failed.request.filename)
+
+    def test_only_failed_or_cancelled_can_be_retried(self):
+        self.assertFalse(self.queue.retry(self.pending.id))
+        self.pending.status = ItemStatus.DONE
+        self.assertFalse(self.queue.retry(self.pending.id))
+        self.failed.status = ItemStatus.CANCELLED
+        self.assertTrue(self.queue.retry(self.failed.id))
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

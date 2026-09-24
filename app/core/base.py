@@ -148,6 +148,22 @@ class DRMProtectedError(DownloaderError):
     )
 
 
+class ProcessingError(DownloaderError):
+    title = "Error al procesar con FFmpeg"
+    default_message = (
+        "La descarga terminó, pero FFmpeg no pudo unir o convertir el archivo.\n"
+        "El detalle quedó en el archivo de logs. Puedes reintentar la descarga."
+    )
+
+
+class CorruptFileError(DownloaderError):
+    title = "Archivo final dañado"
+    default_message = (
+        "El archivo descargado está incompleto o dañado y se eliminó.\n"
+        "Suele deberse a cortes del servidor durante la descarga. Puedes reintentarla."
+    )
+
+
 class DownloadCancelledError(DownloaderError):
     title = "Descarga cancelada"
     default_message = "La descarga fue cancelada por el usuario."

@@ -11,10 +11,11 @@ solo sobrescriben los puntos de extensión:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yt_dlp
 from yt_dlp.utils import DownloadCancelled, DownloadError, sanitize_filename
@@ -23,6 +24,7 @@ from app.core.base import (
     AccessDeniedError,
     BaseDownloader,
     ContentUnavailableError,
+    CorruptFileError,
     DownloadCancelledError,
     DownloaderError,
     DownloadRequest,
@@ -33,12 +35,14 @@ from app.core.base import (
     FFmpegNotFoundError,
     InvalidURLError,
     NetworkError,
+    ProcessingError,
     ProgressCallback,
     ProgressInfo,
     QualityOption,
     ResolvedMedia,
 )
-from app.core.dependencies import check_connection, find_js_runtime, require_ffmpeg
+from app.core.dependencies import check_connection, find_ffprobe, find_js_runtime, require_ffmpeg
+from app.core.validation import MediaCheck, validate_media
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +51,8 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # El orden importa: se evalúan de arriba abajo.
 _ERROR_RULES: tuple[tuple[tuple[str, ...], type[DownloaderError]], ...] = (
     (("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed"), FFmpegNotFoundError),
+    (("postprocessing:", "conversion failed", "ffmpeg exited with code",
+      "invalid data found when processing input"), ProcessingError),
     (("drm protected", "drm-protected", "this video is drm"), DRMProtectedError),
     (("http error 403", "http error 401", "403: forbidden", "401: unauthorized"), AccessDeniedError),
     ((
@@ -84,6 +90,15 @@ def translate_error(message: str) -> DownloaderError:
     """Convierte un error de yt-dlp en un error comprensible para el usuario."""
     text = clean_message(message)
     lower = text.lower()
+    # Reintentos agotados por un 4xx (p. ej. un segmento HLS que el servidor ya no tiene):
+    # no es un problema de conexión aunque el mensaje diga «Giving up after N retries».
+    if "giving up after" in lower and re.search(r"http error (404|410)", lower):
+        return ContentUnavailableError(
+            "Una parte del video ya no está disponible en el servidor (HTTP 404).\n"
+            "No se ensambló un archivo con cortes; lo descargado se conserva y puedes "
+            "reintentar más tarde.",
+            detail=text,
+        )
     for hints, error_cls in _ERROR_RULES:
         if any(h in lower for h in hints):
             if error_cls is InvalidURLError:
@@ -209,6 +224,10 @@ class YdlLogger:
         log.error(clean_message(msg))
 
 
+def _path_key(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
 class ProgressTracker:
     """Adapta los hooks de yt-dlp a ``ProgressInfo`` y aplica pausa y cancelación."""
 
@@ -219,8 +238,18 @@ class ProgressTracker:
         item_count: int | None,
         title_hint: str | None = None,
         pause_event: threading.Event | None = None,
+        validator: Callable[[Path, float | None], MediaCheck] | None = None,
     ):
         self._emit = emit
+        self._validator = validator
+        self.corrupt: list[str] = []            # archivos finales descartados por dañados
+        self._expected_durations: dict[str, float] = {}
+        self._last_duration: float | None = None
+        # Descargas directas (no segmentadas): tamaño anunciado por el servidor la primera
+        # vez, para detectar si cambia el archivo entre reintentos o si queda incompleto.
+        self._announced_sizes: dict[str, int] = {}
+        self._download_issues: list[str] = []
+        self._downloaded: list[Path] = []      # archivos que yt-dlp terminó de descargar
         self._cancel = cancel_event
         self._pause = pause_event or threading.Event()
         self._pause_lock = threading.Lock()   # en HLS los hooks llegan desde varios hilos
@@ -280,6 +309,7 @@ class ProgressTracker:
         index, count = self._position(info)
         title = self._title(info)
 
+        self._check_size_consistency(d)
         if d["status"] == "downloading":
             done = d.get("downloaded_bytes") or 0
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -295,16 +325,58 @@ class ProgressTracker:
                 speed=d.get("speed"), eta=d.get("eta"), item_index=index, item_count=count,
             ))
         elif d["status"] == "finished":
+            if d.get("filename"):
+                self._downloaded.append(Path(d["filename"]))
             self._emit(ProgressInfo(
                 stage=DownloadStage.PROCESSING, title=title, percent=100.0,
                 message="Descarga terminada, procesando…", item_index=index, item_count=count,
             ))
 
+    def _check_size_consistency(self, d: dict[str, Any]) -> None:
+        """Descarga directa por HTTP: detecta un servidor que cambia el archivo al reanudar.
+
+        Al reanudar tras un corte, yt-dlp pide «desde el byte N». Si entretanto el servidor
+        sirve otra versión del archivo (otro tamaño total), los trozos no encajan y el
+        resultado queda corrupto aunque la descarga «termine». En HLS/DASH no aplica: cada
+        segmento se descarga entero.
+        """
+        filename = d.get("filename")
+        if not filename or d.get("fragment_count") or d.get("fragment_index"):
+            return
+        announced = d.get("total_bytes")
+        if d["status"] == "downloading" and announced:
+            first = self._announced_sizes.setdefault(filename, int(announced))
+            if int(announced) != first:
+                issue = (f"el servidor cambió el archivo durante la descarga ({first:,} → "
+                         f"{int(announced):,} bytes); las partes reanudadas no encajan")
+                if issue not in self._download_issues:
+                    log.warning("%s: %s", Path(filename).name, issue)
+                    self._download_issues.append(issue)
+                self._announced_sizes[filename] = int(announced)
+        elif d["status"] == "finished" and filename in self._announced_sizes:
+            expected = self._announced_sizes[filename]
+            try:
+                actual = os.path.getsize(filename)
+            except OSError:
+                actual = int(d.get("downloaded_bytes") or 0)
+            if actual < expected * 0.99:
+                issue = f"descarga incompleta: {actual:,} de {expected:,} bytes anunciados por el servidor"
+                log.warning("%s: %s", Path(filename).name, issue)
+                self._download_issues.append(issue)
+
     def on_postprocess(self, d: dict[str, Any]) -> None:
         self._checkpoint()
+        info = d.get("info_dict") or {}
+        if d["status"] == "finished":
+            # Duración anunciada por la fuente, para comprobar luego el archivo final.
+            duration = info.get("duration")
+            if duration:
+                self._last_duration = float(duration)
+                if info.get("filepath"):
+                    self._expected_durations[_path_key(info["filepath"])] = float(duration)
+            return
         if d["status"] != "started":
             return
-        info = d.get("info_dict") or {}
         index, count = self._position(info)
         self._emit(ProgressInfo(
             stage=DownloadStage.PROCESSING, title=self._title(info),
@@ -312,8 +384,56 @@ class ProgressTracker:
             item_index=index, item_count=count,
         ))
 
+    def discard_unreadable_downloads(self) -> None:
+        """Tras un fallo de FFmpeg: elimina lo descargado que ni FFmpeg puede leer.
+
+        Las pistas válidas (p. ej. video y audio por separado cuando falla la unión) se
+        conservan para que un reintento no tenga que volver a descargarlas.
+        """
+        if self._validator is None:
+            return
+        for path in self._downloaded:
+            if not path.is_file():
+                continue
+            check = self._validator(path, None)
+            if check.ok:
+                log.info("Se conserva para reintentar: %s (%.1f MB)", path.name, check.size / 1e6)
+                continue
+            log.error("Archivo descargado ilegible, se elimina: %s | motivo: %s", path, check.reason)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("No se pudo eliminar %s", path, exc_info=True)
+
     def on_file_done(self, filepath: str) -> None:
+        """post_hook de yt-dlp: el archivo terminó (descarga + todo el post-procesado).
+
+        Antes de darlo por bueno se valida; si está dañado se elimina para que no quede
+        un archivo inservible con apariencia de completo y se anota como fallo.
+        """
         path = Path(filepath)
+        issues, self._download_issues = self._download_issues, []
+        if self._validator is not None:
+            expected = self._expected_durations.get(_path_key(filepath), self._last_duration)
+            self._last_duration = None
+            # Si la propia descarga ya fue inconsistente no hace falta analizar el archivo.
+            check = MediaCheck(False, "; ".join(issues)) if issues else self._validator(path, expected)
+            if not check.ok:
+                log.error("Archivo final dañado, se elimina: %s | motivo: %s", path, check.reason)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    log.warning("No se pudo eliminar %s", path, exc_info=True)
+                self.corrupt.append(f"{path.name}: {check.reason}")
+                self._emit(ProgressInfo(
+                    stage=DownloadStage.PROCESSING, title=path.stem,
+                    message=f"Archivo dañado ({check.reason}); se eliminó",
+                ))
+                return
+            log.info(
+                "Archivo verificado: %s (%.1f MB%s)", path.name, check.size / 1e6,
+                f", {check.duration:.0f} s" if check.duration else "",
+            )
         self.completed.append(path)
         self._emit(ProgressInfo(
             stage=DownloadStage.ITEM_DONE, title=path.stem, percent=100.0,
@@ -378,7 +498,12 @@ class YtDlpDownloader(BaseDownloader):
 
         logger = YdlLogger()
         title_hint = None if is_playlist else (request.filename or target.title)
-        tracker = ProgressTracker(on_progress, cancel_event, item_count, title_hint, pause_event)
+        ffprobe = find_ffprobe(ffmpeg)
+        expect_video = request.download_type.is_video
+        tracker = ProgressTracker(
+            on_progress, cancel_event, item_count, title_hint, pause_event,
+            validator=lambda path, expected: validate_media(path, expect_video, ffprobe, expected),
+        )
         options = self._build_options(request, target, ffmpeg, is_playlist, logger, tracker)
 
         try:
@@ -388,19 +513,28 @@ class YtDlpDownloader(BaseDownloader):
             log.info("Descarga cancelada por el usuario")
             raise DownloadCancelledError() from exc
         except DownloadError as exc:
-            raise translate_error(str(exc)) from exc
+            error = translate_error(str(exc))
+            if isinstance(error, ProcessingError):
+                tracker.discard_unreadable_downloads()
+            raise self._failure(error) from exc
 
+        failed = logger.errors + tracker.corrupt
         if not tracker.completed:
+            if tracker.corrupt:
+                raise self._failure(CorruptFileError(detail="; ".join(tracker.corrupt)))
             if logger.errors:
-                raise translate_error(logger.errors[0])
-            raise DownloaderError("No se encontró contenido descargable en el enlace.")
+                raise self._failure(translate_error(logger.errors[0]))
+            raise self._failure(DownloaderError("No se encontró contenido descargable en el enlace."))
 
-        log.info(
-            "Descarga completada: %d archivo(s), %d error(es)", len(tracker.completed), len(logger.errors)
-        )
-        return DownloadResult(
-            output_dir=request.output_dir, completed=tracker.completed, failed=logger.errors,
-        )
+        log.info("Descarga completada: %d archivo(s), %d error(es)", len(tracker.completed), len(failed))
+        return DownloadResult(output_dir=request.output_dir, completed=tracker.completed, failed=failed)
+
+    @staticmethod
+    def _failure(error: DownloaderError) -> DownloaderError:
+        """Registra la causa completa en media_downloader.log antes de propagar el error."""
+        log.error("Descarga fallida [%s]: %s | detalle: %s",
+                  type(error).__name__, str(error).replace("\n", " "), error.detail or "-")
+        return error
 
     def list_qualities(self, request: DownloadRequest) -> list[QualityOption]:
         url = request.url.strip()
@@ -480,6 +614,10 @@ class YtDlpDownloader(BaseDownloader):
             "overwrites": False,
             # Reanuda archivos .part y segmentos ya descargados (tras pausa, corte o reinicio).
             "continuedl": True,
+            # Si un segmento HLS/DASH falla tras todos los reintentos, se aborta en lugar de
+            # saltarlo: así FFmpeg solo une el video cuando están el 100 % de los segmentos
+            # (por defecto yt-dlp los omite y el video final queda con cortes).
+            "skip_unavailable_fragments": False,
             # Hilos en paralelo para los segmentos HLS/DASH (elegible en Opciones avanzadas).
             "concurrent_fragment_downloads": max(1, request.concurrent_fragments),
             "progress_hooks": [tracker.on_download],

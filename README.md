@@ -369,6 +369,32 @@ se conserva también el `.srt` junto al video.
 - En streams HLS se usan las pistas de subtítulos del propio `.m3u8` si las hay.
 - Si un subtítulo falla, el video se descarga igualmente y el aviso queda en el log.
 
+### Verificación del archivo final
+
+Una descarga solo se marca como **Completada** si el archivo final pasa estas comprobaciones;
+si no, se **elimina** y la fila queda en **Error** con el motivo, lista para **Reintentar**:
+
+1. **Coherencia de la descarga directa (HTTP):** si al reanudar tras un corte el servidor anuncia
+   un tamaño total distinto, está sirviendo otra versión del archivo y las partes no encajan
+   (causa típica del «.mp4 de 1 KB»). También falla si lo descargado es menor que lo anunciado.
+2. **Tamaño mínimo** (16 KB) y **lectura con ffprobe**: debe tener pista de video (formatos de
+   video) o de audio, y una duración real.
+3. **Duración** frente a la anunciada por la fuente (al menos el 90 %) y **tasa de bytes**
+   coherente con la duración.
+
+No se usa un umbral fijo tipo «5 MB»: rechazaría canciones MP3 o clips cortos válidos.
+
+- **HLS/DASH:** si un segmento falla tras todos los reintentos, la descarga se detiene en lugar de
+  omitirlo (`skip_unavailable_fragments = False`): FFmpeg solo une el video con el 100 % de los
+  segmentos. Los segmentos ya descargados se conservan y un reintento continúa desde ahí.
+- **Si FFmpeg falla** al unir o convertir, la descarga queda en **Error** («Error al procesar con
+  FFmpeg»), la causa exacta de FFmpeg se registra en `media_downloader.log` y se elimina lo que ni
+  FFmpeg puede leer (las pistas válidas se conservan para el reintento).
+- **Reintentar** vuelve a poner la descarga en cola con **el mismo nombre de archivo** que el
+  primer intento, para que yt-dlp reanude desde el `.part` (`continuedl`). Un `.part` solo se
+  puede reanudar si el nombre coincide: si la página cambia de título entre visitas, fija el
+  **Nombre** en *Opciones avanzadas*.
+
 ### Cortes de red
 
 Cada petición y cada segmento HLS/DASH se reintentan hasta **20 veces**, con espera creciente

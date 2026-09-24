@@ -9,7 +9,8 @@ import itertools
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from app.core import DownloadRequest, DownloadType
 
 log = logging.getLogger(__name__)
 _ids = itertools.count(1)
+# Prefijo «[3/12] » que la interfaz añade al título de los elementos de una lista.
+_PLAYLIST_POSITION = re.compile(r"^\[\d+/\d+\]\s*")
 
 
 class ItemStatus(Enum):
@@ -139,6 +142,29 @@ class DownloadQueue:
         removed = [i.id for i in self._items if i.status is ItemStatus.PENDING]
         self._items = [i for i in self._items if i.status is not ItemStatus.PENDING]
         return removed
+
+    def retry(self, item_id: int) -> bool:
+        """Vuelve a poner en cola (al final) una descarga fallida o cancelada.
+
+        Si no tenía un nombre fijado, se fija el que usó el primer intento: así el
+        reintento escribe en el mismo archivo y yt-dlp reanuda desde su .part en lugar de
+        empezar de cero (el título de una página web puede cambiar entre visitas, y el
+        nombre automático de un .m3u8 directo lleva la hora).
+        """
+        item = self.get(item_id)
+        if item is None or item.status not in (ItemStatus.FAILED, ItemStatus.CANCELLED):
+            return False
+        stem = _PLAYLIST_POSITION.sub("", item.title).strip()
+        if item.request.filename is None and stem and not _PLAYLIST_POSITION.match(item.title):
+            item.request = replace(item.request, filename=stem)
+        item.status = ItemStatus.PENDING
+        item.percent = 0.0
+        item.message = ""
+        item.error = ""
+        item.files = []
+        self._items.remove(item)
+        self._items.append(item)
+        return True
 
     def move(self, item_id: int, direction: int) -> bool:
         """Sube (-1) o baja (+1) un pendiente un puesto *entre los pendientes*.

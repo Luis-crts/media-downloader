@@ -393,6 +393,7 @@ class DownloaderApp(ctk.CTk):
             on_clear_pending=self._clear_pending,
             on_move=self._move_item,
             on_start=self._start_queue,
+            on_retry=self._retry_item,
             corner_radius=12,
         )
         self.queue_view.grid(row=ROW_QUEUE, column=0, sticky="ew", padx=20, pady=(0, 14))
@@ -694,7 +695,8 @@ class DownloaderApp(ctk.CTk):
         except DownloadCancelledError:
             self._events.put(("cancelled", (item_id, None)))
         except DownloaderError as exc:
-            log.warning("Descarga #%d fallida: %s | %s", item_id, exc, exc.detail)
+            log.error("Descarga #%d fallida [%s]: %s | detalle: %s",
+                      item_id, type(exc).__name__, exc, exc.detail or "-")
             self._events.put(("error", (item_id, exc)))
         except Exception as exc:  # error inesperado: se registra y se informa
             log.exception("Error inesperado en la descarga #%d", item_id)
@@ -732,6 +734,17 @@ class DownloaderApp(ctk.CTk):
             self._queue_changed()
             if item and direction < 0 and self._queue.next_pending() is item:
                 self._log(f"⇡ Siguiente en la cola: {shorten(item.display_title, 60)}")
+
+    def _retry_item(self, item_id: int) -> None:
+        """Reintentar: vuelve a la cola con el mismo nombre de archivo (reanuda su .part)."""
+        if not self._queue.retry(item_id):
+            return
+        item = self._queue.get(item_id)
+        self.queue_view.update_item(item)
+        self._queue_changed()
+        log.info("Reintento #%d: %s (nombre: %s)", item_id, item.request.url, item.request.filename or "automático")
+        self._log(f"↻ Reintento en cola: {shorten(item.display_title, 60)}")
+        self._start_next()
 
     def _start_queue(self) -> None:
         self._log("▶ Cola iniciada")
@@ -899,7 +912,9 @@ class DownloaderApp(ctk.CTk):
             self.item_label.configure(text=f"{error.title}: {shorten(item.display_title, 60)}")
             self.status_label.configure(text=str(error).splitlines()[0])
             self._log(f"✖ {error.title}: {error}")
-            dialog = (messagebox.showerror, error.title, f"{shorten(item.display_title, 80)}\n\n{error}")
+            dialog = (messagebox.showerror, error.title,
+                      f"{shorten(item.display_title, 80)}\n\n{error}\n\n"
+                      "Puedes pulsar «Reintentar» en la cola de descargas.")
         else:
             self._finish_item(item, ItemStatus.CANCELLED)
             self._reset_progress()

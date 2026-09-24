@@ -3,6 +3,7 @@ from app.core.base import (
     AccessDeniedError,
     BaseDownloader,
     ContentUnavailableError,
+    CorruptFileError,
     DownloadCancelledError,
     DownloaderError,
     DownloadRequest,
@@ -13,6 +14,7 @@ from app.core.base import (
     FFmpegNotFoundError,
     InvalidURLError,
     NetworkError,
+    ProcessingError,
     ProgressInfo,
     QualityOption,
     ResolvedMedia,
@@ -29,9 +31,9 @@ from app.core import downloader  # noqa: F401,E402  (YouTube)
 from app.core import generic  # noqa: F401,E402  (Web / M3U8)
 
 __all__ = [
-    "AccessDeniedError", "BaseDownloader", "ContentUnavailableError", "DownloadCancelledError",
+    "AccessDeniedError", "BaseDownloader", "ContentUnavailableError", "CorruptFileError", "DownloadCancelledError",
     "DownloaderError", "DownloadRequest", "DownloadResult", "DownloadStage", "DownloadType",
-    "DRMProtectedError", "FFmpegNotFoundError", "InvalidURLError", "NetworkError", "ProgressInfo",
+    "DRMProtectedError", "FFmpegNotFoundError", "InvalidURLError", "NetworkError", "ProcessingError", "ProgressInfo",
     "QualityOption", "ResolvedMedia", "available_sources", "get_downloader", "register_downloader",
     "register_resolver", "default_user_agent", "find_ffmpeg", "find_js_runtime", "ffmpeg_version",
 ]

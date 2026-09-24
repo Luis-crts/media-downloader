@@ -201,6 +201,11 @@ class OptionsTests(unittest.TestCase):
         # yt-dlp la llama con argumento con nombre: sleep_func(n=…).
         self.assertEqual([backoff(n=k) for k in range(6)], [1, 2, 4, 8, 10, 10])
 
+    def test_hls_is_only_assembled_with_all_fragments(self):
+        # Un segmento que falla tras los reintentos aborta la descarga en vez de omitirse.
+        self.assertIs(self._options()["skip_unavailable_fragments"], False)
+        self.assertTrue(self._options()["continuedl"])
+
     def test_fragment_threads_follow_request(self):
         self.assertEqual(self._options()["concurrent_fragment_downloads"], 8)
         for threads in (1, 4, 16):

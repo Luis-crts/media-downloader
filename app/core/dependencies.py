@@ -29,6 +29,17 @@ def find_ffmpeg() -> Path | None:
     return Path(found) if found else None
 
 
+def find_ffprobe(ffmpeg: Path | None = None) -> Path | None:
+    """ffprobe suele estar junto a ffmpeg; si no, se busca en el PATH."""
+    ffmpeg = ffmpeg or find_ffmpeg()
+    if ffmpeg is not None:
+        sibling = ffmpeg.with_name(f"ffprobe{_EXE}")
+        if sibling.is_file():
+            return sibling
+    found = shutil.which("ffprobe")
+    return Path(found) if found else None
+
+
 def require_ffmpeg() -> Path:
     ffmpeg = find_ffmpeg()
     if ffmpeg is None:
