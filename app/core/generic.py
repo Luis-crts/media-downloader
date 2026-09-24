@@ -45,7 +45,8 @@ _NOT_FOUND_HINT = (
 @register_downloader
 class GenericDownloader(YtDlpDownloader):
     name = "Web / M3U8"
-    supported_types = tuple(DownloadType)
+    # Todos los formatos de yt-dlp; los torrents los atiende solo el proveedor P2P.
+    supported_types = tuple(t for t in DownloadType if t is not DownloadType.TORRENT)
 
     @classmethod
     def can_handle(cls, url: str) -> bool:

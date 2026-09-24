@@ -13,6 +13,7 @@ Windows y Linux, con acceso directo en el Escritorio y en el menú de aplicacion
 - [FFmpeg](#ffmpeg)
 - [Uso](#uso)
 - [Películas / Video web (M3U8)](#películas--video-web-m3u8)
+- [Torrent (enlaces magnet)](#torrent-enlaces-magnet)
 - [Solución de problemas](#solución-de-problemas)
 - [Añadir una nueva fuente](#añadir-una-nueva-fuente)
 
@@ -42,6 +43,8 @@ App musica/
         ├── ytdlp_backend.py       # Flujo común yt-dlp: analizar, descargar, progreso, errores
         ├── downloader.py          # Proveedor YouTube
         ├── generic.py             # Proveedor Web / M3U8 (respaldo para cualquier URL)
+        ├── torrent.py             # Proveedor P2P: magnet y .torrent (libtorrent)
+        ├── validation.py          # Verificación del archivo final (ffprobe)
         ├── extractor.py           # Resolvers por sitio + sniffer de páginas (HTML/iframes/JS)
         └── dependencies.py        # Detección de FFmpeg, runtime JS y conexión
 tests/                             # Pruebas sin red (python -m unittest discover -s tests)
@@ -467,6 +470,34 @@ class MiServidorResolver(SiteResolver):
 
 Los resolvers se ejecutan antes que yt-dlp y el sniffer. Mantenlos pequeños: los sitios
 cambian a menudo, así que conviene cubrir cada uno con una prueba en `tests/`.
+
+## Torrent (enlaces magnet)
+
+Formato **Película / Torrent (Enlace Magnet)**. Acepta:
+- enlaces **magnet** (`magnet:?xt=urn:btih:…`, también BitTorrent v2 `urn:btmh:`),
+- URLs a archivos **.torrent**,
+- archivos **.torrent** del disco (botón **.torrent…** junto a *Pegar*).
+
+Al pegar un enlace magnet el formato cambia solo a *Torrent*. Usa **libtorrent** y va a la misma
+cola que el resto: pausa, cancelar, reintentar, prioridades y persistencia funcionan igual. El
+progreso muestra porcentaje, **↓ bajada · ↑ subida**, **semillas y pares** conectados y tiempo
+restante. Los archivos se guardan en la carpeta de destino, dentro de la carpeta del torrent.
+
+Comportamiento:
+- **No se comparte al terminar.** Mientras descarga, BitTorrent sube datos a otros pares (es parte
+  del protocolo); al llegar al 100 % se detiene. No se abren puertos en el router (UPnP/NAT-PMP
+  desactivados).
+- **Reanudación:** al pausar, cancelar o cerrar la app se conservan los datos; *Reintentar* (o
+  volver a añadir el mismo enlace con la misma carpeta) comprueba las piezas y continúa donde iba.
+- **Integridad:** cada pieza se verifica por hash, por eso no se aplica la verificación con ffprobe.
+- **Sin fuentes:** si un magnet no consigue metadatos en 5 min, o la descarga pasa 15 min sin
+  avanzar, queda en *Error* (lo descargado se conserva para reintentar).
+- Windows puede pedir permiso en el **firewall** la primera vez: la app escucha en el puerto 6881
+  para recibir conexiones de otros pares (funciona también sin ese permiso, con menos pares).
+
+> En BitTorrent tu dirección IP es visible para el resto de pares del enjambre. Úsalo con
+> contenido que tengas derecho a descargar y compartir (software libre, dominio público,
+> licencias Creative Commons…).
 
 ## Solución de problemas
 

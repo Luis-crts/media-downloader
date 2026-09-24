@@ -2,3 +2,5 @@
 yt-dlp[default]>=2025.11.12
 # Interfaz gráfica
 customtkinter>=5.2.2
+# Descargas P2P (enlaces magnet / .torrent)
+libtorrent>=2.0.11

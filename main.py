@@ -69,6 +69,7 @@ def _has_ejs_scripts() -> bool:
 def self_check() -> int:
     """Comprueba que el binario contiene todo lo necesario. Devuelve el código de salida."""
     from app.core import find_ffmpeg, find_js_runtime
+    from app.core.torrent import libtorrent_version
     import yt_dlp
 
     import customtkinter
@@ -86,8 +87,9 @@ def self_check() -> int:
         "yt_dlp_ejs": _has_ejs_scripts(),
         "ffmpeg": str(find_ffmpeg() or "NO ENCONTRADO"),
         "js_runtime": find_js_runtime() or "NO ENCONTRADO",
+        "libtorrent": libtorrent_version() or "",
     }
-    required = ("icon.ico", "icon.png", "customtkinter_theme", "yt_dlp_extractors", "yt_dlp_ejs")
+    required = ("icon.ico", "icon.png", "customtkinter_theme", "yt_dlp_extractors", "yt_dlp_ejs", "libtorrent")
     ok = all(checks[k] for k in required)
 
     report = "\n".join(f"{k}: {v}" for k, v in checks.items())
@@ -104,10 +106,12 @@ def test_download(url: str) -> int:
     calidad más baja disponible y deja el resultado en el log y en self-check.txt.
     """
     from app.core import DownloaderError, DownloadRequest, DownloadType, get_downloader
+    from app.core.torrent import is_torrent_source
 
     output = user_data_dir() / "test-download"
+    kind = DownloadType.TORRENT if is_torrent_source(url) else DownloadType.WEB_VIDEO
     request = DownloadRequest(
-        url=url, output_dir=output, download_type=DownloadType.WEB_VIDEO,
+        url=url, output_dir=output, download_type=kind,
         quality=240, filename="test-download", concurrent_fragments=8,
     )
     try:

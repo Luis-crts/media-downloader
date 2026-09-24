@@ -24,6 +24,7 @@ class DownloadType(Enum):
     M4A = "Audio M4A / MP4 (sin video)"
     MP4 = "Video MP4 (video + audio)"
     WEB_VIDEO = "Películas / Video Web (M3U8 / Enlace genérico)"
+    TORRENT = "Película / Torrent (Enlace Magnet)"
 
     @property
     def is_video(self) -> bool:
@@ -80,6 +81,10 @@ class ProgressInfo:
     eta: int | None = None            # segundos
     item_index: int | None = None     # posición dentro de la lista
     item_count: int | None = None
+    # Solo P2P (torrent): velocidad de subida y fuentes conectadas.
+    upload_speed: float | None = None  # bytes/s
+    seeds: int | None = None
+    peers: int | None = None
 
 
 @dataclass

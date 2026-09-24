@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import customtkinter as ctk
 
 from app import __version__
+from app.core.torrent import is_torrent_source
 from app.download_queue import DownloadQueue, ItemStatus, QueueItem, load_queue, save_queue
 from app.paths import log_file_path, queue_file_path, resource_path
 from app.widgets import CollapsibleSection, QueueView, shorten
@@ -215,14 +216,20 @@ class DownloaderApp(ctk.CTk):
         ctk.CTkLabel(card, text="Enlace").grid(row=0, column=0, sticky="w", **pad)
         self.url_entry = ctk.CTkEntry(
             card, height=36,
-            placeholder_text="YouTube, página de video, enlace .m3u8 o .mp4…",
+            placeholder_text="YouTube, página de video, .m3u8/.mp4 o enlace magnet…",
         )
         self.url_entry.grid(row=0, column=1, sticky="ew", pady=(14, 8))
         self.url_entry.bind("<Return>", lambda _e: self._enqueue())
         self.url_entry.bind("<KeyRelease>", lambda _e: self._on_url_changed())
-        ctk.CTkButton(card, text="Pegar", width=80, command=self._paste_url).grid(
-            row=0, column=2, padx=14, pady=(14, 8)
+        url_buttons = ctk.CTkFrame(card, fg_color="transparent")
+        url_buttons.grid(row=0, column=2, padx=14, pady=(14, 8))
+        ctk.CTkButton(url_buttons, text="Pegar", width=80, command=self._paste_url).pack(side="left")
+        # Solo con el formato Torrent: elegir un archivo .torrent del disco.
+        self.torrent_file_button = ctk.CTkButton(
+            url_buttons, text=".torrent…", width=80, fg_color="transparent", border_width=1,
+            text_color=("gray10", "gray90"), command=self._choose_torrent_file,
         )
+        self.torrent_file_button.pack(side="left", padx=(6, 0))
 
         ctk.CTkLabel(card, text="Formato").grid(row=1, column=0, sticky="w", **pad)
         ctk.CTkOptionMenu(
@@ -444,6 +451,19 @@ class DownloaderApp(ctk.CTk):
             self.web_card.grid()
         else:
             self.web_card.grid_remove()
+        if download_type is DownloadType.TORRENT:
+            self.torrent_file_button.pack(side="left", padx=(6, 0))
+        else:
+            self.torrent_file_button.pack_forget()
+
+    def _choose_torrent_file(self) -> None:
+        chosen = filedialog.askopenfilename(
+            title="Abrir archivo .torrent", filetypes=[("Torrent", "*.torrent"), ("Todos", "*.*")],
+        )
+        if chosen:
+            self.url_entry.delete(0, "end")
+            self.url_entry.insert(0, str(Path(chosen)))
+            self._on_url_changed()
 
     def _on_subtitles_toggle(self) -> None:
         self.subtitle_langs_entry.configure(state="normal" if self.subtitles.get() else "disabled")
@@ -459,9 +479,18 @@ class DownloaderApp(ctk.CTk):
             messagebox.showerror(APP_NAME, f"No se pudo abrir el archivo de logs:\n{path}\n\n{exc}")
 
     def _on_url_changed(self) -> None:
-        """Las calidades analizadas dejan de valer si cambia el enlace."""
-        if self._qualities_url and self.url_entry.get().strip() != self._qualities_url:
+        """Las calidades analizadas dejan de valer si cambia el enlace.
+
+        Un enlace magnet o un .torrent cambia el formato a «Torrent» automáticamente:
+        ningún otro motor puede descargarlo.
+        """
+        url = self.url_entry.get().strip()
+        if self._qualities_url and url != self._qualities_url:
             self._set_qualities(None, [])
+        if is_torrent_source(url) and TYPE_BY_LABEL[self.download_type.get()] is not DownloadType.TORRENT:
+            self.download_type.set(DownloadType.TORRENT.value)
+            self._on_type_change(DownloadType.TORRENT.value)
+            self._log("ℹ Enlace torrent detectado: formato cambiado a «Película / Torrent».")
 
     def _set_qualities(self, url: str | None, options: list[QualityOption]) -> None:
         self._qualities_url = url
@@ -860,7 +889,11 @@ class DownloaderApp(ctk.CTk):
             self.progress.set(p.percent / 100)
             self.percent_label.configure(text=f"{p.percent:.1f} %")
             speed = f"{format_bytes(p.speed)}/s" if p.speed else "—"
-            self.speed_label.configure(text=f"Velocidad: {speed}")
+            if p.upload_speed is not None:   # torrent: bajada y subida
+                upload = f"{format_bytes(p.upload_speed)}/s" if p.upload_speed else "—"
+                self.speed_label.configure(text=f"↓ {speed}  ·  ↑ {upload}")
+            else:
+                self.speed_label.configure(text=f"Velocidad: {speed}")
             self.eta_label.configure(text=f"Restante: {format_eta(p.eta)}")
             item.percent = p.percent
         elif p.stage is DownloadStage.ITEM_DONE:

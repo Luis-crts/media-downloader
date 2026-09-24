@@ -28,6 +28,7 @@ from app.core.extractor import default_user_agent, register_resolver
 # Importar los proveedores los registra. El orden importa: los específicos primero
 # y el genérico al final, como respaldo para cualquier URL http(s).
 from app.core import downloader  # noqa: F401,E402  (YouTube)
+from app.core import torrent  # noqa: F401,E402  (P2P: magnet / .torrent)
 from app.core import generic  # noqa: F401,E402  (Web / M3U8)
 
 __all__ = [
