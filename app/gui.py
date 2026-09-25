@@ -25,6 +25,7 @@ from app import __version__
 from app.core.torrent import is_torrent_source
 from app.download_queue import DownloadQueue, ItemStatus, QueueItem, load_queue, save_queue
 from app.paths import log_file_path, queue_file_path, resource_path
+from app import notifications
 from app.search_view import SearchView
 from app.widgets import CollapsibleSection, QueueView, shorten
 from app.core import (
@@ -164,6 +165,10 @@ class DownloaderApp(ctk.CTk):
         self.filename = ctk.StringVar()
         self.subtitles = ctk.BooleanVar(value=self._settings.get("subtitles", False))
         self.subtitle_langs = ctk.StringVar(value=self._settings.get("subtitle_langs", "es, en"))
+        self.notify_enabled = ctk.BooleanVar(value=self._settings.get("notifications", True))
+        # Descargas terminadas desde que la cola arrancó (para el aviso de «cola terminada»).
+        self._batch: dict[ItemStatus, int] = {}
+        notifications.register_windows_app_id(resource_path("assets", "icon.png"))
         saved_threads = str(self._settings.get("fragment_threads", DEFAULT_THREADS))
         self.threads = ctk.StringVar(value=saved_threads if saved_threads in THREAD_CHOICES else DEFAULT_THREADS)
 
@@ -415,6 +420,7 @@ class DownloaderApp(ctk.CTk):
             on_move=self._move_item,
             on_start=self._start_queue,
             on_retry=self._retry_item,
+            on_play=self._play_item,
             corner_radius=12,
         )
         self.queue_view.grid(row=ROW_QUEUE, column=0, sticky="ew", padx=20, pady=(0, 14))
@@ -426,13 +432,17 @@ class DownloaderApp(ctk.CTk):
         ctk.CTkLabel(
             frame, text="Actividad", font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
         ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ctk.CTkCheckBox(
+            frame, text="Notificar al terminar", variable=self.notify_enabled,
+            command=self._on_notify_toggle, checkbox_width=20, checkbox_height=20,
+        ).grid(row=0, column=1, sticky="e", padx=(0, 12), pady=(0, 4))
         ctk.CTkButton(
             frame, text="Abrir archivo de logs", width=150, height=28,
             fg_color="transparent", border_width=1, text_color=("gray10", "gray90"),
             command=self._open_log_file,
-        ).grid(row=0, column=1, sticky="e", pady=(0, 4))
+        ).grid(row=0, column=2, sticky="e", pady=(0, 4))
         self.log_box = ctk.CTkTextbox(frame, height=110, corner_radius=12, state="disabled")
-        self.log_box.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.log_box.grid(row=1, column=0, columnspan=3, sticky="nsew")
 
     # ------------------------------------------------------------- acciones
     def _change_appearance(self, label: str) -> None:
@@ -790,6 +800,34 @@ class DownloaderApp(ctk.CTk):
             self._queue_changed()
             self._log(f"■ {pending} pendiente(s) quitada(s) de la cola")
 
+    def _play_item(self, item: QueueItem) -> None:
+        """▶ Reproducir: abre el archivo con el reproductor predeterminado del sistema."""
+        media = item.media_file
+        if media is None:
+            messagebox.showinfo(APP_NAME, "El archivo descargado ya no está en su carpeta (¿se movió o se borró?).")
+            self.queue_view.update_item(item)
+            return
+        log.info("Reproducir #%d: %s", item.id, media)
+        try:
+            open_path(media)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo abrir el archivo:\n{media}\n\n{exc}")
+
+    def _on_notify_toggle(self) -> None:
+        self._settings["notifications"] = self.notify_enabled.get()
+        save_settings(self._settings)
+
+    def _in_background(self) -> bool:
+        """La ventana está minimizada o no tiene el foco: solo entonces se notifica."""
+        try:
+            return self.state() == "iconic" or self.focus_displayof() is None
+        except tk.TclError:
+            return True
+
+    def _notify(self, title: str, message: str) -> None:
+        if self.notify_enabled.get() and self._in_background():
+            notifications.notify(title, message, resource_path("assets", "icon.png"))
+
     def _open_item_folder(self, item: QueueItem) -> None:
         folder = item.files[0].parent if item.files else item.request.output_dir
         if folder.is_dir():
@@ -997,9 +1035,16 @@ class DownloaderApp(ctk.CTk):
             )
             self._log("■ Descarga cancelada")
 
+        self._batch[item.status] = self._batch.get(item.status, 0) + 1
+        if kind == "done":
+            self._notify("Descarga completada", shorten(item.display_title, 90))
+        elif kind == "error":
+            self._notify("Error en la descarga", f"{shorten(item.display_title, 70)} — {data.title}")
+
         self._start_next()
         if self._active_id is None:
             self._show_queue_summary()
+            self._notify_queue_finished()
             # Con la cola parada, un diálogo no retrasa ninguna descarga.
             if dialog:
                 show, title, message = dialog
@@ -1018,6 +1063,16 @@ class DownloaderApp(ctk.CTk):
         self.queue_view.update_item(item)
         self._queue_changed()
         self._update_controls()
+
+    def _notify_queue_finished(self) -> None:
+        """Aviso de grupo: la cola terminó después de procesar varias descargas."""
+        batch, self._batch = self._batch, {}
+        done = batch.get(ItemStatus.DONE, 0)
+        failed = batch.get(ItemStatus.FAILED, 0)
+        if done + failed + batch.get(ItemStatus.CANCELLED, 0) < 2:
+            return            # una sola descarga: ya se avisó individualmente
+        message = f"{done} completada(s)" + (f", {failed} con error" if failed else "")
+        self._notify("Cola de descargas terminada", message)
 
     def _show_queue_summary(self) -> None:
         counts = self._queue.counts()

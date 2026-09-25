@@ -65,9 +65,16 @@ Source: "{#FFmpegDir}\LICENSE.txt"; DestDir: "{app}\bin"; DestName: "FFmpeg-LICE
 Source: "{#RootDir}\packaging\windows\FFmpeg-README.txt"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 [Icons]
-; El icono (espada y engranajes) está embebido en el .exe.
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Comment: "Descarga música, videos y torrents"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
+; El icono (espada y engranajes) está embebido en el .exe. AppUserModelID debe coincidir
+; con el de la app (MediaDownloader.App) para que Windows agrupe la ventana y atribuya las
+; notificaciones a «Media Downloader».
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Comment: "Descarga música, videos y torrents"; AppUserModelID: "MediaDownloader.App"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon; AppUserModelID: "MediaDownloader.App"
+
+[Registry]
+; Registro de la app para las notificaciones de Windows (se elimina al desinstalar).
+Root: HKA; Subkey: "Software\Classes\AppUserModelId\MediaDownloader.App"; ValueType: string; ValueName: "DisplayName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\AppUserModelId\MediaDownloader.App"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\_internal\assets\icon.png"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

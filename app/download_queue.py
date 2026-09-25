@@ -18,6 +18,11 @@ from app.core import DownloadRequest, DownloadType
 
 log = logging.getLogger(__name__)
 _ids = itertools.count(1)
+# Archivos que se pueden reproducir (se excluyen subtítulos, carátulas, .nfo…).
+MEDIA_EXTENSIONS = frozenset({
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ogv", ".mpg", ".mpeg", ".ts",
+    ".mp3", ".m4a", ".ogg", ".opus", ".flac", ".wav", ".aac",
+})
 # Prefijo «[3/12] » que la interfaz añade al título de los elementos de una lista.
 _PLAYLIST_POSITION = re.compile(r"^\[\d+/\d+\]\s*")
 
@@ -50,6 +55,12 @@ class QueueItem:
     message: str = ""
     files: list[Path] = field(default_factory=list)
     error: str = ""
+
+    @property
+    def media_file(self) -> Path | None:
+        """El archivo a reproducir: el video o audio más grande que siga existiendo."""
+        candidates = [f for f in self.files if f.suffix.lower() in MEDIA_EXTENSIONS and f.is_file()]
+        return max(candidates, key=lambda f: f.stat().st_size) if candidates else None
 
     @property
     def display_title(self) -> str:

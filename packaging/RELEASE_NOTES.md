@@ -21,7 +21,22 @@
   también la configuración y la cola).
 - Requiere glibc 2.35 o posterior (Ubuntu 22.04+, Debian 12+, Fedora 36+…).
 
-## Novedades de la 0.10.0
+## Media Downloader 1.0.0 — versión estable
+
+Descarga música y video de YouTube (MP3, M4A, MP4), video web y streams HLS/M3U8, torrents y
+enlaces magnet, y busca películas libres en Internet Archive, Wikimedia Commons y Blender
+Studio. Todo en una cola con prioridades, pausa, reintentos y verificación del archivo final.
+
+### Novedades de la 1.0.0
+- **▶ Reproducir** en cada descarga completada: abre el video o audio con el reproductor
+  predeterminado del sistema.
+- **Notificaciones del sistema** (Windows y Linux) al terminar una descarga o una cola completa
+  mientras la app está en segundo plano; se pueden desactivar.
+- **Subtítulos en español** comprobados de extremo a extremo en YouTube: se incrustan en el MP4
+  como pista `spa` y se guarda el `.srt`.
+- El instalador de Windows registra la app para las notificaciones y lo elimina al desinstalar.
+
+### Novedades de la 0.10.0
 - Dos fuentes nuevas en **Buscar películas**: **Wikimedia Commons** (películas, documentales y
   material histórico con licencia libre) y **Blender Studio** (sus películas abiertas: Sintel,
   Big Buck Bunny, Tears of Steel, Spring, Sprite Fright, Charge…).
@@ -29,7 +44,7 @@
   película** (original, 1080p, 480p) para elegir entre calidad y peso.
 - El filtro de idioma usa los subtítulos disponibles cuando la fuente no indica el del audio.
 
-## Novedades de la 0.9.0
+### Novedades de la 0.9.0
 - Pestaña **Buscar películas**: búsqueda en Internet Archive (dominio público y licencias
   libres) con título, año, formato/calidad, idioma, tamaño y popularidad; orden por peso o
   popularidad, filtro de idioma y botón **Añadir a la cola** en cada película.
@@ -37,7 +52,7 @@
   película y sus subtítulos) y admite servidores HTTP adicionales (*web seeds*).
 - Arquitectura de búsqueda extensible: `BaseSearchProvider` + `@register_search_provider`.
 
-## Novedades de la 0.8.0
+### Novedades de la 0.8.0
 - Descargas **P2P**: enlaces magnet y archivos `.torrent` (libtorrent), en la misma cola.
 - **Verificación del archivo final** con ffprobe: una descarga incompleta o dañada ya no se
   marca como completada; botón **Reintentar** que reanuda desde lo descargado.

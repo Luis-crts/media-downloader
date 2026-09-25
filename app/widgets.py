@@ -99,12 +99,14 @@ class QueueRow(ctk.CTkFrame):
         on_open: Callable[[QueueItem], None],
         on_move: Callable[[int, int], None],
         on_retry: Callable[[int], None],
+        on_play: Callable[[QueueItem], None],
     ) -> None:
         super().__init__(master, corner_radius=8, fg_color=("gray88", "gray20"))
         self._on_remove = on_remove
         self._on_open = on_open
         self._on_move = on_move
         self._on_retry = on_retry
+        self._on_play = on_play
         self._item = item
         self._position: tuple[int, int] | None = None
         self.grid_columnconfigure(1, weight=1)
@@ -136,6 +138,12 @@ class QueueRow(ctk.CTkFrame):
             self, width=84, height=26, text="Reintentar", command=lambda: self._on_retry(self._item.id),
         )
         self.retry.grid(row=0, column=6, rowspan=2, padx=(4, 0))
+        # Reproducir: en descargas completadas (misma columna que «Reintentar»).
+        self.play = ctk.CTkButton(
+            self, width=84, height=26, text="▶ Reproducir", fg_color=("#1e8449", "#1e8449"),
+            hover_color=("#196f3d", "#196f3d"), command=lambda: self._on_play(self._item),
+        )
+        self.play.grid(row=0, column=6, rowspan=2, padx=(4, 0))
         self.action = ctk.CTkButton(
             self, width=72, height=26, fg_color="transparent", border_width=1,
             text_color=("gray10", "gray90"), command=self._on_action,
@@ -185,6 +193,10 @@ class QueueRow(ctk.CTkFrame):
             self.retry.grid()
         else:
             self.retry.grid_remove()
+        if item.status is ItemStatus.DONE and item.media_file is not None:
+            self.play.grid()
+        else:
+            self.play.grid_remove()
         if item.status is ItemStatus.DONE:
             self.action.configure(text="Abrir", state="normal", border_width=1)
         elif item.status.running:
@@ -214,6 +226,7 @@ class QueueView(ctk.CTkFrame):
         on_move: Callable[[int, int], None],
         on_start: Callable[[], None],
         on_retry: Callable[[int], None],
+        on_play: Callable[[QueueItem], None],
         **kwargs,
     ) -> None:
         super().__init__(master, **kwargs)
@@ -221,6 +234,7 @@ class QueueView(ctk.CTkFrame):
         self._on_open = on_open
         self._on_move = on_move
         self._on_retry = on_retry
+        self._on_play = on_play
         self._rows: dict[int, QueueRow] = {}
         self.grid_columnconfigure(0, weight=1)
 
@@ -258,7 +272,8 @@ class QueueView(ctk.CTkFrame):
         self.set_counts({status: 0 for status in ItemStatus}, idle=True)
 
     def add_item(self, item: QueueItem) -> None:
-        row = QueueRow(self.rows_frame, item, self._on_remove, self._on_open, self._on_move, self._on_retry)
+        row = QueueRow(self.rows_frame, item, self._on_remove, self._on_open, self._on_move, self._on_retry,
+                       self._on_play)
         self._rows[item.id] = row
         self._regrid()
 

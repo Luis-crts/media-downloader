@@ -375,8 +375,11 @@ nombre, carpeta), así que puedes cambiarlas entre un enlace y otro.
   sigue con la siguiente.
 - **▲ / ▼** cambian la prioridad de un pendiente (p. ej. adelantar canciones ligeras a
   películas pesadas). Solo reordenan los pendientes entre sí: la descarga activa no se toca.
-- *Quitar* elimina un pendiente; *Abrir* abre la carpeta de una completada; *Vaciar
-  pendientes* y *Limpiar terminadas* actúan sobre toda la lista.
+- **▶ Reproducir** (en las completadas) abre el archivo con el reproductor predeterminado del
+  sistema; si la descarga trae varios archivos (subtítulos, extras de un torrent) abre el video o
+  audio principal. *Abrir* abre su carpeta.
+- *Quitar* elimina un pendiente; *Vaciar pendientes* y *Limpiar terminadas* actúan sobre toda
+  la lista.
 - Un enlace que ya está pendiente o en curso (mismo enlace y formato) no se añade dos veces.
 - Los errores quedan en la fila y en *Actividad*; el diálogo de error solo aparece cuando la
   cola se detiene, para no bloquear las descargas siguientes.
@@ -392,6 +395,19 @@ Las listas se guardan en una subcarpeta con su nombre y numeradas (`001 - Títul
 Si un elemento de la lista no está disponible, se omite y se informa al final.
 La última carpeta, formato, subtítulos y tema se recuerdan en `~/.media_downloader.json`.
 
+### Notificaciones
+
+Con **Notificar al terminar** (junto a *Actividad*, activada por defecto) la app avisa con una
+notificación del sistema cuando termina una descarga —o falla— **mientras la ventana está
+minimizada o en segundo plano**, y con un resumen cuando termina una cola de varias
+(«2 completadas, 1 con error»). Con la ventana delante no se notifica.
+
+- **Windows 10/11:** notificaciones nativas del sistema. Windows solo las acepta de apps
+  registradas: el instalador registra `MediaDownloader.App` (y lo elimina al desinstalar); desde
+  el código fuente la app lo registra en `HKCU\Software\Classes\AppUserModelId`.
+- **Linux:** `notify-send` (paquete `libnotify-bin` en Debian/Ubuntu) o `gdbus`.
+- Si el sistema no puede mostrarlas, solo se anota en el log.
+
 ### Pausar, reanudar y cancelar
 
 - **Pausar** detiene la recepción de datos al instante: el hilo de descarga (y, en HLS, cada
@@ -404,9 +420,11 @@ La última carpeta, formato, subtítulos y tema se recuerdan en `~/.media_downlo
 
 ### Subtítulos
 
-Solo para *Video MP4* y *Películas / Video web*. Se descargan los subtítulos manuales y, si no
-hay, los automáticos; se convierten a **SRT**, se **incrustan** en el MP4 como pista de texto y
-se conserva también el `.srt` junto al video.
+Solo para *Video MP4* y *Películas / Video web* (YouTube y cualquier sitio que yt-dlp soporte).
+Marca **Subtítulos** y deja `es` en *Idiomas* para subtítulos en español. Se descargan los
+subtítulos manuales y, si no hay, los automáticos; se convierten a **SRT**, se **incrustan** en
+el MP4 como pista de texto (idioma `spa`, seleccionable en el reproductor) y se conserva también
+el `.srt` junto al video.
 
 - **Idiomas:** códigos separados por comas (`es, en`). Cada código incluye sus variantes
   regionales (`es` → `es`, `es-ES`, `es-419`). `all` descarga todos.
