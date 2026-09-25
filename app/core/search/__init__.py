@@ -13,6 +13,7 @@ from app.core.search.base import (
     SortOrder,
     filter_by_language,
     get_search_provider,
+    merge_results,
     normalize_language,
     register_search_provider,
     search_providers,
@@ -21,9 +22,11 @@ from app.core.search.base import (
 
 # Importar los proveedores los registra (el primero es el predeterminado).
 from app.core.search import archive_org  # noqa: F401,E402
+from app.core.search import commons  # noqa: F401,E402
+from app.core.search import blender  # noqa: F401,E402
 
 __all__ = [
     "BaseSearchProvider", "LanguageFilter", "SearchError", "SearchQuery", "SearchResult", "SortOrder",
-    "filter_by_language", "get_search_provider", "normalize_language", "register_search_provider",
+    "filter_by_language", "get_search_provider", "merge_results", "normalize_language", "register_search_provider",
     "search_providers", "sort_results",
 ]

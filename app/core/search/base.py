@@ -41,17 +41,30 @@ class SearchResult:
     download_type: DownloadType
     year: int | None = None
     quality: str = ""                     # p. ej. "480p · h.264"
-    languages: tuple[str, ...] = ()       # nombres legibles: ("Español", "Inglés")
+    languages: tuple[str, ...] = ()       # idioma del audio: ("Español", "Inglés")
+    subtitle_languages: tuple[str, ...] = ()   # subtítulos disponibles en la fuente
+    duration: float | None = None         # segundos
     size_bytes: int | None = None         # lo que se descargará (no el ítem completo)
     popularity: int | None = None         # descargas / visitas según la fuente
     license: str = ""                     # p. ej. "Dominio público", "CC BY-NC-ND 3.0"
     files: tuple[str, ...] = ()           # archivos concretos a descargar dentro del torrent
     web_seeds: tuple[str, ...] = ()       # servidores HTTP para el torrent (BEP 19)
+    filename: str = ""                    # nombre del archivo en descargas directas
+    headers: dict[str, str] = field(default_factory=dict)   # cabeceras HTTP para la descarga
     rank: int = 0                         # posición original (orden por relevancia)
 
     @property
     def language_label(self) -> str:
-        return ", ".join(self.languages) if self.languages else "—"
+        parts = [", ".join(self.languages)] if self.languages else []
+        if self.subtitle_languages:
+            subs = ", ".join(self.subtitle_languages[:3])
+            extra = len(self.subtitle_languages) - 3
+            parts.append(f"subt.: {subs}" + (f" (+{extra})" if extra > 0 else ""))
+        return " · ".join(parts) if parts else "—"
+
+    def has_language(self, language: str) -> bool:
+        """Audio o subtítulos en ese idioma."""
+        return language in self.languages or language in self.subtitle_languages
 
 
 @dataclass(frozen=True)
@@ -144,7 +157,23 @@ def normalize_language(value: str) -> str | None:
 def filter_by_language(results: list[SearchResult], language: LanguageFilter) -> list[SearchResult]:
     if language is LanguageFilter.ALL:
         return list(results)
-    return [r for r in results if language.value in r.languages]
+    return [r for r in results if r.has_language(language.value)]
+
+
+def merge_results(per_source: list[list[SearchResult]]) -> list[SearchResult]:
+    """Une los resultados de varias fuentes intercalándolos por relevancia: primero el
+    mejor de cada fuente, después el segundo… (``rank`` se reescribe para ello).
+
+    Si dos fuentes devuelven el mismo archivo (p. ej. una película de Blender que está en
+    Wikimedia Commons), se conserva el de la fuente registrada después, que es la más
+    específica y suele tener mejores datos (título limpio, año de estreno).
+    """
+    by_url: dict[str, SearchResult] = {}
+    for index, results in enumerate(per_source):
+        for result in results:
+            result.rank = result.rank * len(per_source) + index
+            by_url[result.download_url] = result
+    return sorted(by_url.values(), key=lambda r: r.rank)
 
 
 def sort_results(results: list[SearchResult], order: SortOrder) -> list[SearchResult]:

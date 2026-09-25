@@ -645,9 +645,10 @@ class DownloaderApp(ctk.CTk):
             output_dir=Path(self.output_dir.get()),
             download_type=result.download_type,
             # Descarga directa (sin torrent): el archivo se llama como la película.
-            filename=None if result.download_type is DownloadType.TORRENT else result.title,
+            filename=None if result.download_type is DownloadType.TORRENT else (result.filename or result.title),
             torrent_files=result.files,
             web_seeds=result.web_seeds,
+            headers=dict(result.headers),
         )
         duplicate = self._queue.find_duplicate(request)
         if duplicate:

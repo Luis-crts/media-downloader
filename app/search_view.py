@@ -2,8 +2,9 @@
 
 La búsqueda corre en un hilo secundario (puede tardar unos segundos: se consultan los
 metadatos de cada resultado) y comunica el resultado por una cola que se consulta con
-``after()``, igual que las descargas. Los filtros de orden se aplican en local; el de
-idioma repite la búsqueda en el servidor para no perder resultados.
+``after()``, igual que las descargas. Con «Todas» se consulta cada fuente registrada en
+paralelo; si una falla, se muestran las demás. Los filtros de orden se aplican en local;
+el de idioma repite la búsqueda en cada fuente para no perder resultados.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import logging
 import queue
 import threading
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import customtkinter as ctk
@@ -22,6 +24,8 @@ from app.core.search import (
     SearchResult,
     SortOrder,
     get_search_provider,
+    merge_results,
+    search_providers,
     sort_results,
 )
 from app.widgets import shorten
@@ -30,9 +34,11 @@ log = logging.getLogger(__name__)
 
 _MUTED = ("gray40", "gray65")
 POLL_MS = 100
+ALL_SOURCES = "Todas"
+PER_SOURCE_LIMIT = 25        # con «Todas», resultados pedidos a cada fuente
 COLUMNS = (   # (encabezado, ancho mínimo)
-    ("Título", 260), ("Año", 50), ("Formato / calidad", 130), ("Idioma", 90),
-    ("Tamaño", 80), ("Popularidad", 90), ("", 140),
+    ("Título", 240), ("Año", 50), ("Formato / calidad", 200), ("Idioma", 140),
+    ("Tamaño", 80), ("Popularidad", 80), ("", 150),
 )
 
 
@@ -63,15 +69,17 @@ class SearchView(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent", **kwargs)
         self._on_add = on_add
         self._on_log = on_log
-        self._provider = get_search_provider()
+        self._providers = {name: get_search_provider(name) for name in search_providers()}
         self._results: list[SearchResult] = []
         self._added: set[str] = set()
         self._events: queue.Queue[tuple[int, object]] = queue.Queue()
         self._token = 0             # identifica la búsqueda en curso (descarta respuestas viejas)
+        self._counts: dict[str, int] = {}
+        self._errors: dict[str, SearchError] = {}
         self._searching = False
         self._last_text = ""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
         self._build()
         self.after(POLL_MS, self._poll)
 
@@ -87,38 +95,49 @@ class SearchView(ctk.CTkFrame):
         self.search_button.grid(row=0, column=1, padx=(8, 0))
         ctk.CTkLabel(
             bar, anchor="w", text_color=_MUTED,
-            text=f"Fuente: {self._provider.name} — {self._provider.description}. "
-                 "La licencia de cada película la declara quien la subió: revísala en su página.",
-            wraplength=720, justify="left",
+            text="Solo contenido de dominio público o con licencia libre: "
+                 + "; ".join(f"{p.name} ({p.description})" for p in self._providers.values())
+                 + ". La licencia aparece bajo cada título: pulsa el título para ver su página.",
+            wraplength=780, justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
+        sources = ctk.CTkFrame(self, fg_color="transparent")
+        sources.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 6))
+        ctk.CTkLabel(sources, text="Fuente").pack(side="left", padx=(0, 6))
+        self.source = ctk.CTkSegmentedButton(
+            sources, values=[ALL_SOURCES, *self._providers], command=self._on_filter_change,
+        )
+        self.source.set(ALL_SOURCES)
+        self.source.pack(side="left")
+
         filters = ctk.CTkFrame(self, fg_color="transparent")
-        filters.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 6))
+        filters.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 6))
         ctk.CTkLabel(filters, text="Ordenar").pack(side="left", padx=(0, 6))
         self.sort = ctk.CTkSegmentedButton(filters, values=[o.value for o in SortOrder], command=lambda _v: self._render())
         self.sort.set(SortOrder.RELEVANCE.value)
         self.sort.pack(side="left")
         ctk.CTkLabel(filters, text="Idioma").pack(side="left", padx=(18, 6))
         self.language = ctk.CTkSegmentedButton(
-            filters, values=[l.value for l in LanguageFilter], command=self._on_language_change,
+            filters, values=[l.value for l in LanguageFilter], command=self._on_filter_change,
         )
         self.language.set(LanguageFilter.ALL.value)
         self.language.pack(side="left")
 
         status = ctk.CTkFrame(self, fg_color="transparent")
-        status.grid(row=2, column=0, sticky="ew", padx=4)
+        status.grid(row=3, column=0, sticky="ew", padx=4)
         status.grid_columnconfigure(1, weight=1)
         self.spinner = ctk.CTkProgressBar(status, mode="indeterminate", width=120, height=8)
         self.status = ctk.CTkLabel(status, text="Escribe qué buscar y pulsa «Buscar».", anchor="w", text_color=_MUTED)
         self.status.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
         self.table = ctk.CTkScrollableFrame(self, corner_radius=12)
-        self.table.grid(row=3, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self.table.grid(row=4, column=0, sticky="nsew", padx=4, pady=(0, 4))
         for col, (_, minsize) in enumerate(COLUMNS):
             self.table.grid_columnconfigure(col, weight=1 if col == 0 else 0, minsize=minsize)
 
     # ------------------------------------------------------------- búsqueda
-    def _on_language_change(self, _value: str) -> None:
+    def _on_filter_change(self, _value: str) -> None:
+        """Fuente o idioma: se repite la búsqueda (el filtro lo aplica cada fuente)."""
         if self._last_text:
             self.start_search(self._last_text)
 
@@ -130,21 +149,34 @@ class SearchView(ctk.CTkFrame):
         self._last_text = text
         self._token += 1
         language = LanguageFilter(self.language.get())
+        source = self.source.get()
+        providers = list(self._providers.values()) if source == ALL_SOURCES else [self._providers[source]]
         query = SearchQuery(text=text, language=language)
-        self._set_searching(True, f"Buscando opciones en {self._provider.name}…")
-        log.info("Búsqueda #%d: %r (idioma: %s)", self._token, text, language.value)
-        threading.Thread(target=self._run, args=(self._token, query), daemon=True, name="busqueda").start()
+        if len(providers) > 1:
+            query = SearchQuery(text=text, language=language, limit=PER_SOURCE_LIMIT)
+        names = ", ".join(p.name for p in providers)
+        self._set_searching(True, f"Buscando opciones en {names}…")
+        log.info("Búsqueda #%d: %r (fuentes: %s, idioma: %s)", self._token, text, names, language.value)
+        threading.Thread(target=self._run, args=(self._token, providers, query), daemon=True, name="busqueda").start()
 
-    def _run(self, token: int, query: SearchQuery) -> None:
-        """Hilo secundario: nunca toca widgets."""
-        try:
-            self._events.put((token, self._provider.search(query)))
-        except SearchError as exc:
-            log.warning("Búsqueda fallida: %s | %s", exc, exc.detail)
-            self._events.put((token, exc))
-        except Exception as exc:   # cualquier otro fallo se informa igual
-            log.exception("Error inesperado en la búsqueda")
-            self._events.put((token, SearchError(f"Error inesperado: {exc}")))
+    def _run(self, token: int, providers: list, query: SearchQuery) -> None:
+        """Hilo secundario: consulta las fuentes en paralelo. Nunca toca widgets."""
+        def one(provider):
+            try:
+                return provider, provider.search(query), None
+            except SearchError as exc:
+                log.warning("Búsqueda fallida en %s: %s | %s", provider.name, exc, exc.detail)
+                return provider, [], exc
+            except Exception as exc:   # un fallo de una fuente no tumba las demás
+                log.exception("Error inesperado en la búsqueda (%s)", provider.name)
+                return provider, [], SearchError(f"Error inesperado: {exc}")
+
+        with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+            outcomes = list(pool.map(one, providers))
+        counts = {provider.name: len(results) for provider, results, _ in outcomes}
+        errors = {provider.name: error for provider, _, error in outcomes if error is not None}
+        merged = merge_results([results for _, results, _ in outcomes])
+        self._events.put((token, (merged, counts, errors)))
 
     def _poll(self) -> None:
         try:
@@ -153,13 +185,10 @@ class SearchView(ctk.CTkFrame):
                 if token != self._token:
                     continue          # respuesta de una búsqueda ya reemplazada
                 self._set_searching(False)
-                if isinstance(payload, SearchError):
-                    self._results = []
-                    self._render()
-                    self.status.configure(text=str(payload))
-                else:
-                    self._results = payload
-                    self._render()
+                results, counts, errors = payload
+                self._results = results
+                self._counts, self._errors = counts, errors
+                self._render()
         except queue.Empty:
             pass
         self.after(POLL_MS, self._poll)
@@ -186,13 +215,18 @@ class SearchView(ctk.CTkFrame):
                 row=0, column=col, sticky="ew", padx=6, pady=(4, 6))
 
         results = sort_results(self._results, SortOrder(self.sort.get()))
+        by_source = " · ".join(
+            f"{name}: {'sin respuesta' if name in self._errors else count}" for name, count in self._counts.items()
+        )
         if not results:
             if self._last_text and not self._searching:
-                self.status.configure(text=f"Sin resultados para «{self._last_text}» con estos filtros.")
+                if self._errors and len(self._errors) == len(self._counts):
+                    message = str(next(iter(self._errors.values())))
+                else:
+                    message = f"Sin resultados para «{self._last_text}» con estos filtros ({by_source})."
+                self.status.configure(text=message)
             return
-        self.status.configure(
-            text=f"{len(results)} película(s) para «{self._last_text}». Pulsa el título para ver su página y licencia."
-        )
+        self.status.configure(text=f"{len(results)} opción(es) para «{self._last_text}» — {by_source}.")
         for row, result in enumerate(results, start=1):
             self._render_row(row, result)
 
@@ -204,11 +238,11 @@ class SearchView(ctk.CTkFrame):
                              font=ctk.CTkFont(size=13, underline=True))
         title.pack(anchor="w")
         title.bind("<Button-1>", lambda _e, url=result.page_url: webbrowser.open(url))
-        ctk.CTkLabel(title_box, text=result.license, anchor="w", text_color=_MUTED,
+        ctk.CTkLabel(title_box, text=f"{result.provider} · {result.license}", anchor="w", text_color=_MUTED,
                      font=ctk.CTkFont(size=11)).pack(anchor="w")
 
         values = (
-            str(result.year or "—"), result.quality or "—", result.language_label,
+            str(result.year or "—"), result.quality or "—", shorten(result.language_label, 26),
             format_size(result.size_bytes), format_count(result.popularity),
         )
         for col, value in enumerate(values, start=1):

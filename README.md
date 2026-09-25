@@ -14,7 +14,7 @@ Windows y Linux, con acceso directo en el Escritorio y en el menú de aplicacion
 - [Uso](#uso)
 - [Películas / Video web (M3U8)](#películas--video-web-m3u8)
 - [Torrent (enlaces magnet)](#torrent-enlaces-magnet)
-- [Buscar películas (Internet Archive)](#buscar-películas-internet-archive)
+- [Buscar películas](#buscar-películas)
 - [Solución de problemas](#solución-de-problemas)
 - [Añadir una nueva fuente](#añadir-una-nueva-fuente)
 
@@ -48,7 +48,7 @@ App musica/
         ├── downloader.py          # Proveedor YouTube
         ├── generic.py             # Proveedor Web / M3U8 (respaldo para cualquier URL)
         ├── torrent.py             # Proveedor P2P: magnet y .torrent (libtorrent)
-        ├── search/                # Búsqueda: BaseSearchProvider + Internet Archive
+        ├── search/                # Búsqueda: BaseSearchProvider + Archive, Commons, Blender
         ├── validation.py          # Verificación del archivo final (ffprobe)
         ├── extractor.py           # Resolvers por sitio + sniffer de páginas (HTML/iframes/JS)
         └── dependencies.py        # Detección de FFmpeg, runtime JS y conexión
@@ -543,17 +543,40 @@ Comportamiento:
 > contenido que tengas derecho a descargar y compartir (software libre, dominio público,
 > licencias Creative Commons…).
 
-## Buscar películas (Internet Archive)
+## Buscar películas
 
-Pestaña **Buscar películas**. Busca en [Internet Archive](https://archive.org) con su API pública
-y muestra una tabla con **título, año, formato/calidad, idioma, tamaño y popularidad**
-(descargas en Archive). La búsqueda corre en segundo plano («Buscando opciones…»).
+Pestaña **Buscar películas**. Busca contenido de dominio público o con licencia libre y muestra
+una tabla con **título, año, formato/calidad, idioma, tamaño y popularidad**. La búsqueda corre
+en segundo plano («Buscando opciones…»).
 
+| Fuente | Qué aporta | Cómo se descarga |
+|---|---|---|
+| **Internet Archive** | Largometrajes clásicos (cine mudo, negro, serie B…) | Torrent de Archive (solo la mejor versión) |
+| **Wikimedia Commons** | Películas, documentales y material histórico (≥ 3 min) | Directa, original o recodificada a 1080p/480p |
+| **Blender Studio** | Las películas abiertas de Blender: Elephants Dream, Big Buck Bunny, Sintel, Tears of Steel, Cosmos Laundromat, Spring, Sprite Fright, Charge, Wing It!… | Directa desde Commons o `download.blender.org` |
+
+- **Fuente:** «Todas» consulta las tres en paralelo e intercala sus resultados; si una falla, se
+  muestran las demás. Si dos fuentes devuelven el mismo archivo, se queda la más específica.
 - **Ordenar:** relevancia, menor peso, mayor peso, más populares (en local, al instante).
-- **Idioma:** todos, español o inglés (repite la búsqueda en Archive, que mezcla códigos como
-  `spa` y nombres como `Spanish`).
-- **Pulsa el título** para abrir su página en Archive y comprobar la licencia.
-- **Añadir a la cola** envía la película a la cola principal (motor P2P).
+- **Idioma:** todos, español o inglés. En Archive es el idioma del audio; en Commons y Blender,
+  el de los **subtítulos disponibles** (Commons no registra el idioma del audio).
+- **Varias calidades por película:** en Commons/Blender cada película aparece en varias filas
+  (original, 1080p, 480p y, si existe, la copia de blender.org). El tamaño de las versiones
+  recodificadas es una estimación (bitrate × duración).
+- **Pulsa el título** para abrir su página y comprobar la licencia (visible bajo cada título).
+- **Añadir a la cola** envía la película a la cola principal.
+
+**Wikimedia Commons** solo admite contenido libre (lo exige y revisa). La búsqueda usa su API
+pública; las descargas se hacen con el User-Agent propio de la app, porque
+`upload.wikimedia.org` responde 403 a clientes que se presentan como un navegador genérico.
+Los videos de menos de 3 minutos se omiten para centrarse en películas y documentales.
+
+**Blender Studio** no publica una API de catálogo: el listado sale de la categoría
+«Blender movies» de Commons (las películas nuevas aparecen solas), sin duplicados y con el
+año de estreno, más las copias que siguen en `download.blender.org` (Sintel 1080p MKV,
+Tears of Steel 720p). *Agent 327: Operation Barbershop* no está: en Commons solo hay el teaser.
+
+### Internet Archive
 
 Solo aparecen películas **de dominio público o con licencia libre**: las de la colección
 `feature_films` que declaran una licencia Creative Commons o de dominio público, y las de las

@@ -21,6 +21,14 @@
   también la configuración y la cola).
 - Requiere glibc 2.35 o posterior (Ubuntu 22.04+, Debian 12+, Fedora 36+…).
 
+## Novedades de la 0.10.0
+- Dos fuentes nuevas en **Buscar películas**: **Wikimedia Commons** (películas, documentales y
+  material histórico con licencia libre) y **Blender Studio** (sus películas abiertas: Sintel,
+  Big Buck Bunny, Tears of Steel, Spring, Sprite Fright, Charge…).
+- Selector de **fuente** («Todas» consulta las tres en paralelo) y **varias calidades por
+  película** (original, 1080p, 480p) para elegir entre calidad y peso.
+- El filtro de idioma usa los subtítulos disponibles cuando la fuente no indica el del audio.
+
 ## Novedades de la 0.9.0
 - Pestaña **Buscar películas**: búsqueda en Internet Archive (dominio público y licencias
   libres) con título, año, formato/calidad, idioma, tamaño y popularidad; orden por peso o
