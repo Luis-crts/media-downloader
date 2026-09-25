@@ -21,6 +21,14 @@
   también la configuración y la cola).
 - Requiere glibc 2.35 o posterior (Ubuntu 22.04+, Debian 12+, Fedora 36+…).
 
+## Novedades de la 0.9.0
+- Pestaña **Buscar películas**: búsqueda en Internet Archive (dominio público y licencias
+  libres) con título, año, formato/calidad, idioma, tamaño y popularidad; orden por peso o
+  popularidad, filtro de idioma y botón **Añadir a la cola** en cada película.
+- El motor P2P descarga solo los archivos elegidos de un torrent (la mejor versión de la
+  película y sus subtítulos) y admite servidores HTTP adicionales (*web seeds*).
+- Arquitectura de búsqueda extensible: `BaseSearchProvider` + `@register_search_provider`.
+
 ## Novedades de la 0.8.0
 - Descargas **P2P**: enlaces magnet y archivos `.torrent` (libtorrent), en la misma cola.
 - **Verificación del archivo final** con ffprobe: una descarga incompleta o dañada ya no se

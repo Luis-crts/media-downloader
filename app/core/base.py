@@ -51,6 +51,8 @@ class DownloadRequest:
     subtitles: bool = False                    # descargar e incrustar subtítulos (solo video)
     subtitle_langs: tuple[str, ...] = ("es", "en")  # códigos de idioma; ("all",) = todos
     concurrent_fragments: int = 8              # segmentos HLS/DASH descargados en paralelo
+    torrent_files: tuple[str, ...] = ()        # solo estos archivos del torrent (vacío = todos)
+    web_seeds: tuple[str, ...] = ()            # servidores HTTP adicionales para el torrent (BEP 19)
 
 
 @dataclass(frozen=True)

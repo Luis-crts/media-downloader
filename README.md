@@ -14,6 +14,7 @@ Windows y Linux, con acceso directo en el Escritorio y en el menú de aplicacion
 - [Uso](#uso)
 - [Películas / Video web (M3U8)](#películas--video-web-m3u8)
 - [Torrent (enlaces magnet)](#torrent-enlaces-magnet)
+- [Buscar películas (Internet Archive)](#buscar-películas-internet-archive)
 - [Solución de problemas](#solución-de-problemas)
 - [Añadir una nueva fuente](#añadir-una-nueva-fuente)
 
@@ -39,6 +40,7 @@ App musica/
     ├── paths.py                   # Rutas compatibles con PyInstaller (sys._MEIPASS)
     ├── gui.py                     # Interfaz CustomTkinter (solo presentación)
     ├── widgets.py                 # Sección plegable y lista de la cola
+    ├── search_view.py             # Pestaña «Buscar películas»
     ├── download_queue.py          # Modelo de la cola (sin interfaz, con pruebas)
     └── core/
         ├── base.py                # Contratos: BaseDownloader, modelos, errores, registro
@@ -46,6 +48,7 @@ App musica/
         ├── downloader.py          # Proveedor YouTube
         ├── generic.py             # Proveedor Web / M3U8 (respaldo para cualquier URL)
         ├── torrent.py             # Proveedor P2P: magnet y .torrent (libtorrent)
+        ├── search/                # Búsqueda: BaseSearchProvider + Internet Archive
         ├── validation.py          # Verificación del archivo final (ffprobe)
         ├── extractor.py           # Resolvers por sitio + sniffer de páginas (HTML/iframes/JS)
         └── dependencies.py        # Detección de FFmpeg, runtime JS y conexión
@@ -539,6 +542,45 @@ Comportamiento:
 > En BitTorrent tu dirección IP es visible para el resto de pares del enjambre. Úsalo con
 > contenido que tengas derecho a descargar y compartir (software libre, dominio público,
 > licencias Creative Commons…).
+
+## Buscar películas (Internet Archive)
+
+Pestaña **Buscar películas**. Busca en [Internet Archive](https://archive.org) con su API pública
+y muestra una tabla con **título, año, formato/calidad, idioma, tamaño y popularidad**
+(descargas en Archive). La búsqueda corre en segundo plano («Buscando opciones…»).
+
+- **Ordenar:** relevancia, menor peso, mayor peso, más populares (en local, al instante).
+- **Idioma:** todos, español o inglés (repite la búsqueda en Archive, que mezcla códigos como
+  `spa` y nombres como `Spanish`).
+- **Pulsa el título** para abrir su página en Archive y comprobar la licencia.
+- **Añadir a la cola** envía la película a la cola principal (motor P2P).
+
+Solo aparecen películas **de dominio público o con licencia libre**: las de la colección
+`feature_films` que declaran una licencia Creative Commons o de dominio público, y las de las
+colecciones que mantiene Archive (cine mudo, cine negro, ciencia ficción y terror, comedia,
+dibujos clásicos, Prelinger). La licencia la declara quien sube el contenido y puede ser
+incorrecta: por eso cada fila la muestra.
+
+Qué se descarga: cada película de Archive guarda varias copias (MP4, MP4 de 512 kb, OGV, a veces
+el MPEG2 original de varios GB) y su torrent las incluye todas. Se elige **una sola versión**
+—primero formatos que se reproducen en cualquier sitio (MP4/MKV), después la mayor resolución—
+más sus subtítulos `.srt`, y el motor P2P descarga **solo esos archivos**. Si la película está
+dividida en partes (`1of5`, `parte2`, `reel3`…) se descargan todas. El tamaño de la tabla es el
+de esos archivos, no el del ítem completo.
+
+Detalle técnico: los *web seeds* de los torrents de Archive (`archive.org/download/`) redirigen
+al servidor que guarda el ítem, y tras una redirección libtorrent no puede completar las piezas
+que el archivo elegido comparte con los vecinos (la descarga se quedaba en ~94 %). Por eso se
+añaden las URL directas de esos servidores (`web_seeds` en `DownloadRequest`).
+
+### Añadir otro buscador
+
+1. Crea un módulo en `app/core/search/`.
+2. Hereda de `BaseSearchProvider` e implementa `search(query) -> list[SearchResult]`. Cada
+   resultado indica `download_url` y `download_type` (y, si es un torrent, `files`/`web_seeds`).
+3. Decora la clase con `@register_search_provider` e impórtala en `app/core/search/__init__.py`.
+
+Las pruebas de `tests/test_search.py` muestran cómo probar un proveedor sin red.
 
 ## Solución de problemas
 

@@ -25,6 +25,7 @@ from app import __version__
 from app.core.torrent import is_torrent_source
 from app.download_queue import DownloadQueue, ItemStatus, QueueItem, load_queue, save_queue
 from app.paths import log_file_path, queue_file_path, resource_path
+from app.search_view import SearchView
 from app.widgets import CollapsibleSection, QueueView, shorten
 from app.core import (
     DownloadCancelledError,
@@ -50,6 +51,8 @@ SETTINGS_FILE = Path.home() / ".media_downloader.json"
 POLL_MS = 100
 APPEARANCE = {"Sistema": "System", "Claro": "Light", "Oscuro": "Dark"}
 TYPE_BY_LABEL = {t.value: t for t in DownloadType}
+TAB_DOWNLOADS = "Descargas"
+TAB_SEARCH = "Buscar películas"
 AUTO_QUALITY = "Máxima disponible (automática)"
 THREAD_CHOICES = ("1", "4", "8", "16")
 DEFAULT_THREADS = "8"
@@ -115,14 +118,23 @@ class DownloaderApp(ctk.CTk):
 
         self.title(f"{APP_NAME} {__version__}")
         self._set_window_icon()
-        self.geometry("800x820")
+        self.geometry("880x860")
         self.minsize(680, 520)
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        # Dos pestañas: la de descargas (todo lo anterior) y la de búsqueda.
+        self.tabs = ctk.CTkTabview(self, corner_radius=12)
+        self.tabs.grid(row=0, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        downloads_tab = self.tabs.add(TAB_DOWNLOADS)
+        search_tab = self.tabs.add(TAB_SEARCH)
+        for tab in (downloads_tab, search_tab):
+            tab.grid_columnconfigure(0, weight=1)
+            tab.grid_rowconfigure(0, weight=1)
         # Contenedor con scroll: en pantallas bajas (p. ej. 1366x768) nada queda fuera.
-        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        self.body = ctk.CTkScrollableFrame(downloads_tab, fg_color="transparent", corner_radius=0)
         self.body.grid(row=0, column=0, sticky="nsew")
         self.body.grid_columnconfigure(0, weight=1)
+        self._search_tab = search_tab
 
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         # Cola: una descarga activa cada vez; el resto espera su turno.
@@ -166,6 +178,8 @@ class DownloaderApp(ctk.CTk):
         self._on_type_change(self.download_type.get())
         self._on_subtitles_toggle()
         self._check_dependencies()
+        self.search_view = SearchView(self._search_tab, on_add=self._enqueue_search_result, on_log=self._log)
+        self.search_view.grid(row=0, column=0, sticky="nsew")
         self._restore_queue()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_job = self.after(POLL_MS, self._poll_events)
@@ -624,6 +638,31 @@ class DownloaderApp(ctk.CTk):
         messagebox.showerror(error.title, str(error))
 
     # ------------------------------------------------------------------ cola
+    def _enqueue_search_result(self, result) -> bool:
+        """«Añadir a la cola» desde la búsqueda. Devuelve True si se añadió."""
+        request = DownloadRequest(
+            url=result.download_url,
+            output_dir=Path(self.output_dir.get()),
+            download_type=result.download_type,
+            # Descarga directa (sin torrent): el archivo se llama como la película.
+            filename=None if result.download_type is DownloadType.TORRENT else result.title,
+            torrent_files=result.files,
+            web_seeds=result.web_seeds,
+        )
+        duplicate = self._queue.find_duplicate(request)
+        if duplicate:
+            messagebox.showinfo(APP_NAME, f"Esa película ya está en la cola ({duplicate.status.value.lower()}).")
+            return False
+        item = self._queue.add(request, source=result.provider)
+        item.title = f"{result.title} ({result.year})" if result.year else result.title
+        self.queue_view.add_item(item)
+        self._queue_changed()
+        log.info("En cola #%d desde la búsqueda (%s): %s", item.id, result.provider, result.download_url)
+        self._log(f"＋ Búsqueda → cola: {shorten(item.title, 60)} · {result.quality} · "
+                  f"{len(result.files) or 1} archivo(s)")
+        self._start_next()
+        return True
+
     def _enqueue(self) -> None:
         """«Descargar»: añade el enlace a la cola; si no hay nada activo, empieza ya."""
         request = self._build_request()

@@ -13,6 +13,9 @@ Decisiones:
   (verificadas por hash) y solo descarga las que faltan.
 - **Integridad:** cada pieza se verifica con su hash (SHA-1/SHA-256), por lo que no hace
   falta la validación con ffprobe que se aplica a las descargas HTTP.
+- **Selección de archivos:** si la petición trae ``torrent_files`` (p. ej. la mejor versión
+  de una película de Internet Archive, cuyo torrent incluye varias copias), el resto de
+  archivos recibe prioridad 0 y no se descarga.
 """
 from __future__ import annotations
 
@@ -114,19 +117,27 @@ class TorrentDownloader(BaseDownloader):
         on_progress(ProgressInfo(stage=DownloadStage.ANALYZING, message="Leyendo el torrent…"))
         params = self._params(lt, request.url.strip())
         params.save_path = str(request.output_dir)
+        if request.web_seeds:
+            # Se añaden a los del torrent (no los sustituyen): si alguno deja de valer,
+            # los originales siguen disponibles.
+            params.url_seeds = list(dict.fromkeys([*request.web_seeds, *params.url_seeds]))
+            log.info("Torrent: %d servidor(es) HTTP adicional(es)", len(request.web_seeds))
 
         session = lt.session(self._settings(lt))
         handle = session.add_torrent(params)
         # La pausa la controla la aplicación, no la cola interna de libtorrent.
         handle.unset_flags(lt.torrent_flags.auto_managed)
         handle.resume()
+        part_file_names = self._part_file_names(handle)
         try:
-            name = self._run(lt, handle, on_progress, cancel_event, pause_event)
-            files = self._files(handle, request.output_dir)
+            name = self._run(lt, handle, on_progress, cancel_event, pause_event, request.torrent_files)
+            files = self._files(handle, request.output_dir, request.torrent_files)
         finally:
             # Se conservan los datos descargados (reanudables); se deja de compartir.
             session.remove_torrent(handle)
             del session
+        if request.torrent_files:
+            self._remove_part_files(request.output_dir, part_file_names)
 
         log.info("Torrent completado: %s (%d archivo(s))", name, len(files))
         for path in files:
@@ -177,12 +188,13 @@ class TorrentDownloader(BaseDownloader):
         params.ti = info
         return params
 
-    def _run(self, lt, handle, on_progress, cancel_event, pause_event) -> str:
+    def _run(self, lt, handle, on_progress, cancel_event, pause_event, wanted: tuple[str, ...] = ()) -> str:
         """Bucle de estado hasta completar. Devuelve el nombre del torrent."""
         states = lt.torrent_status.states
         started = last_activity = time.monotonic()
         last_done = -1
         paused = False
+        selection_applied = not wanted
         while True:
             if cancel_event.is_set():
                 log.info("Torrent cancelado por el usuario (los datos se conservan)")
@@ -202,6 +214,10 @@ class TorrentDownloader(BaseDownloader):
                 continue
 
             status = handle.status()
+            if status.has_metadata and not selection_applied:
+                self._select_files(handle, wanted)
+                selection_applied = True
+                status = handle.status()
             if status.errc.value():
                 raise DownloaderError(f"Error del torrent: {status.errc.message()}", detail=status.errc.message())
             name = status.name or "Torrent"
@@ -250,9 +266,58 @@ class TorrentDownloader(BaseDownloader):
             cancel_event.wait(POLL_SECONDS)
 
     @staticmethod
-    def _files(handle, output_dir: Path) -> list[Path]:
+    def _part_file_names(handle) -> list[str]:
+        """Nombres del «part file» de libtorrent: «.<info-hash>.parts» (v1 o v2 truncado)."""
+        try:
+            hashes = handle.info_hashes()
+        except AttributeError:     # libtorrent 1.x
+            return [f".{handle.info_hash()}.parts"]
+        names = []
+        if hashes.has_v1():
+            names.append(f".{hashes.v1}.parts")
+        if hashes.has_v2():
+            names.append(f".{str(hashes.v2)[:40]}.parts")
+        return names
+
+    @staticmethod
+    def _remove_part_files(output_dir: Path, names: list[str]) -> None:
+        """Al terminar con selección de archivos, el «part file» (bytes de las piezas de
+        borde que pertenecen a archivos no pedidos) ya no sirve: se elimina."""
+        for name in names:
+            path = output_dir / name
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                log.warning("No se pudo eliminar %s", path, exc_info=True)
+
+    @staticmethod
+    def _wanted_indices(storage, wanted: tuple[str, ...]) -> list[int]:
+        """Índices de los archivos pedidos (por nombre o por ruta dentro del torrent)."""
+        names = {w.replace("\\", "/").strip("/") for w in wanted}
+        indices = []
+        for i in range(storage.num_files()):
+            path = storage.file_path(i).replace("\\", "/")
+            if path in names or any(path.endswith("/" + name) for name in names):
+                indices.append(i)
+        return indices
+
+    def _select_files(self, handle, wanted: tuple[str, ...]) -> None:
         storage = handle.torrent_file().files()
-        return [output_dir / storage.file_path(i) for i in range(storage.num_files())]
+        indices = set(self._wanted_indices(storage, wanted))
+        if not indices:
+            raise InvalidURLError(
+                "Los archivos elegidos no están en este torrent.", detail=", ".join(wanted),
+            )
+        # 4 = prioridad normal; 0 = no descargar.
+        handle.prioritize_files([4 if i in indices else 0 for i in range(storage.num_files())])
+        log.info("Torrent: se descargan %d de %d archivo(s): %s",
+                 len(indices), storage.num_files(), ", ".join(wanted))
+
+    @classmethod
+    def _files(cls, handle, output_dir: Path, wanted: tuple[str, ...] = ()) -> list[Path]:
+        storage = handle.torrent_file().files()
+        indices = cls._wanted_indices(storage, wanted) if wanted else range(storage.num_files())
+        return [output_dir / storage.file_path(i) for i in indices]
 
 
 def _short(url: str) -> str:

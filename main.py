@@ -69,6 +69,7 @@ def _has_ejs_scripts() -> bool:
 def self_check() -> int:
     """Comprueba que el binario contiene todo lo necesario. Devuelve el código de salida."""
     from app.core import find_ffmpeg, find_js_runtime
+    from app.core.search import search_providers
     from app.core.torrent import libtorrent_version
     import yt_dlp
 
@@ -88,8 +89,9 @@ def self_check() -> int:
         "ffmpeg": str(find_ffmpeg() or "NO ENCONTRADO"),
         "js_runtime": find_js_runtime() or "NO ENCONTRADO",
         "libtorrent": libtorrent_version() or "",
+        "buscadores": ", ".join(search_providers()),
     }
-    required = ("icon.ico", "icon.png", "customtkinter_theme", "yt_dlp_extractors", "yt_dlp_ejs", "libtorrent")
+    required = ("icon.ico", "icon.png", "customtkinter_theme", "yt_dlp_extractors", "yt_dlp_ejs", "libtorrent", "buscadores")
     ok = all(checks[k] for k in required)
 
     report = "\n".join(f"{k}: {v}" for k, v in checks.items())

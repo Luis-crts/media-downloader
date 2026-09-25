@@ -216,6 +216,8 @@ def request_to_dict(request: DownloadRequest) -> dict:
         "subtitles": request.subtitles,
         "subtitle_langs": list(request.subtitle_langs),
         "concurrent_fragments": request.concurrent_fragments,
+        "torrent_files": list(request.torrent_files),
+        "web_seeds": list(request.web_seeds),
     }
 
 
@@ -231,6 +233,8 @@ def request_from_dict(data: dict) -> DownloadRequest:
         subtitles=bool(data.get("subtitles", False)),
         subtitle_langs=tuple(data.get("subtitle_langs") or ("es", "en")),
         concurrent_fragments=int(data.get("concurrent_fragments") or 8),
+        torrent_files=tuple(str(f) for f in data.get("torrent_files") or ()),
+        web_seeds=tuple(str(u) for u in data.get("web_seeds") or ()),
     )
 
 
