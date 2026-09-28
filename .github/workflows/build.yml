@@ -110,10 +110,39 @@ jobs:
           path: MediaDownloader-linux.tar.gz
 
   # ----------------------------------------------------------------------------
+  linux-compat:
+    # El binario se compila en Ubuntu 22.04; aquí se prueba en una distribución más nueva,
+    # con su propio FFmpeg. Detecta incompatibilidades entre las bibliotecas empaquetadas por
+    # PyInstaller y los programas del sistema (p. ej. ffprobe), que no aparecen en 22.04.
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: MediaDownloader-linux
+
+      - name: Instalar y descargar en Ubuntu 24.04
+        run: |
+          tar -xzf MediaDownloader-linux.tar.gz
+          ./MediaDownloader-linux/install.sh -y --no-desktop
+          ffprobe -version | head -1
+          "$HOME/.local/bin/MediaDownloader" --self-check
+          set +e
+          "$HOME/.local/bin/MediaDownloader" --test-download https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+          code=$?
+          set -e
+          cat "$HOME/.local/share/media-downloader/self-check.txt"
+          log="$HOME/.local/share/media-downloader/app/media_downloader.log"
+          grep -E "verificado|dañado|ilegible|no puede leerlo" "$log" || true
+          test $code -eq 0
+          # ffprobe del sistema debe haber podido analizar el archivo (no «sin verificar»).
+          grep -q "Archivo verificado" "$log"
+
+  # ----------------------------------------------------------------------------
   release:
-    # Solo en etiquetas vX.Y.Z y solo si ambos instaladores pasaron sus pruebas.
+    # Solo en etiquetas vX.Y.Z y solo si los instaladores pasaron todas sus pruebas.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux]
+    needs: [windows, linux, linux-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write

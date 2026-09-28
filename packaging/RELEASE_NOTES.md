@@ -21,6 +21,19 @@
   también la configuración y la cola).
 - Requiere glibc 2.35 o posterior (Ubuntu 22.04+, Debian 12+, Fedora 36+…).
 
+## Media Downloader 1.0.1 — corrección para Linux
+
+- **Corregido:** en distribuciones Linux más nuevas que Ubuntu 22.04 (p. ej. Ubuntu 24.04), las
+  descargas llegaban al 100 % y el archivo final se borraba. El `ffprobe` del sistema heredaba
+  las bibliotecas empaquetadas de la app (`LD_LIBRARY_PATH`) y no arrancaba
+  (`GLIBCXX_3.4.32 not found`), y el validador lo tomaba como archivo dañado. Ahora los
+  programas externos (ffprobe, el reproductor de ▶ Reproducir, las notificaciones) se lanzan
+  con el entorno original del sistema.
+- **Más seguro:** si ffprobe no puede leer un archivo de más de 1 MB, ya no se borra: se conserva
+  como «sin verificar» con un aviso en el registro. Antes de validar se espera a que el archivo
+  deje de cambiar de tamaño.
+- La integración continua prueba además el binario de Linux en Ubuntu 24.04 con una descarga real.
+
 ## Media Downloader 1.0.0 — versión estable
 
 Descarga música y video de YouTube (MP3, M4A, MP4), video web y streams HLS/M3U8, torrents y

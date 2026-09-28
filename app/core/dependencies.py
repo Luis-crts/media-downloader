@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.core.base import FFmpegNotFoundError, NetworkError
-from app.paths import app_dir, bundle_dir
+from app.paths import app_dir, bundle_dir, external_env
 
 _EXE = ".exe" if os.name == "nt" else ""
 
@@ -52,7 +52,7 @@ def ffmpeg_version(ffmpeg: Path) -> str | None:
     try:
         out = subprocess.run(
             [str(ffmpeg), "-version"], capture_output=True, text=True,
-            timeout=10, creationflags=flags,
+            timeout=10, creationflags=flags, env=external_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

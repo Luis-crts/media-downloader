@@ -24,6 +24,8 @@ import threading
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from app.paths import external_env
+
 log = logging.getLogger(__name__)
 
 APP_ID = "MediaDownloader.App"          # el mismo que usa main.set_windows_app_id()
@@ -114,7 +116,8 @@ def notify(title: str, message: str, icon: Path | None = None) -> None:
             return
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=30, creationflags=flags)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30,
+                                    creationflags=flags, env=external_env())
         except (OSError, subprocess.SubprocessError):
             log.warning("No se pudo mostrar la notificación", exc_info=True)
             return

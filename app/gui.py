@@ -24,7 +24,7 @@ import customtkinter as ctk
 from app import __version__
 from app.core.torrent import is_torrent_source
 from app.download_queue import DownloadQueue, ItemStatus, QueueItem, load_queue, save_queue
-from app.paths import log_file_path, queue_file_path, resource_path
+from app.paths import external_env, log_file_path, queue_file_path, resource_path
 from app import notifications
 from app.search_view import SearchView
 from app.widgets import CollapsibleSection, QueueView, shorten
@@ -87,9 +87,11 @@ def open_path(path: Path) -> None:
     if sys.platform == "win32":
         os.startfile(path)  # noqa: S606
     elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
+        subprocess.Popen(["open", str(path)], env=external_env())
     else:
-        subprocess.Popen(["xdg-open", str(path)])
+        # Sin el entorno original, el reproductor abierto por xdg-open heredaría las
+        # bibliotecas empaquetadas de la app y podría no arrancar.
+        subprocess.Popen(["xdg-open", str(path)], env=external_env())
 
 
 def load_settings() -> dict:

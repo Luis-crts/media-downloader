@@ -42,7 +42,7 @@ from app.core.base import (
     ResolvedMedia,
 )
 from app.core.dependencies import check_connection, find_ffprobe, find_js_runtime, require_ffmpeg
-from app.core.validation import MediaCheck, validate_media
+from app.core.validation import MediaCheck, validate_media, wait_until_stable
 
 log = logging.getLogger(__name__)
 
@@ -417,7 +417,11 @@ class ProgressTracker:
             expected = self._expected_durations.get(_path_key(filepath), self._last_duration)
             self._last_duration = None
             # Si la propia descarga ya fue inconsistente no hace falta analizar el archivo.
-            check = MediaCheck(False, "; ".join(issues)) if issues else self._validator(path, expected)
+            if issues:
+                check = MediaCheck(False, "; ".join(issues))
+            else:
+                wait_until_stable(path)
+                check = self._validator(path, expected)
             if not check.ok:
                 log.error("Archivo final dañado, se elimina: %s | motivo: %s", path, check.reason)
                 try:
@@ -430,14 +434,18 @@ class ProgressTracker:
                     message=f"Archivo dañado ({check.reason}); se eliminó",
                 ))
                 return
-            log.info(
-                "Archivo verificado: %s (%.1f MB%s)", path.name, check.size / 1e6,
-                f", {check.duration:.0f} s" if check.duration else "",
-            )
+            if check.warning:
+                log.warning("Archivo sin verificar: %s (%.1f MB) | %s", path, check.size / 1e6, check.warning)
+            else:
+                log.info(
+                    "Archivo verificado: %s (%.1f MB%s)", path.name, check.size / 1e6,
+                    f", {check.duration:.0f} s" if check.duration else "",
+                )
         self.completed.append(path)
+        unverified = self._validator is not None and check.warning
         self._emit(ProgressInfo(
             stage=DownloadStage.ITEM_DONE, title=path.stem, percent=100.0,
-            message=f"Guardado: {path.name}",
+            message=f"Guardado{' (sin verificar)' if unverified else ''}: {path.name}",
         ))
 
 

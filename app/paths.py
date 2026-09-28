@@ -36,6 +36,28 @@ def app_dir() -> Path:
     return _SOURCE_ROOT
 
 
+def external_env() -> dict[str, str]:
+    """Entorno para lanzar programas del sistema (ffprobe, xdg-open, notify-send…).
+
+    En Linux (y macOS), el ejecutable de PyInstaller apunta ``LD_LIBRARY_PATH``
+    (``DYLD_LIBRARY_PATH``) a sus bibliotecas empaquetadas, y los procesos hijos lo heredan:
+    el ``ffprobe`` del sistema cargaba el ``libstdc++`` de la app (de la distribución donde
+    se compiló) y no arrancaba en distribuciones más nuevas («GLIBCXX_3.4.32 not found»).
+    Se restaura el valor original que PyInstaller guarda en ``*_ORIG`` (o se elimina si no
+    había), igual que hace yt-dlp con sus propias llamadas a FFmpeg.
+    """
+    env = os.environ.copy()
+    if not is_frozen():
+        return env
+    for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        original = env.pop(f"{key}_ORIG", None)
+        if original is None:
+            env.pop(key, None)
+        else:
+            env[key] = original
+    return env
+
+
 def resource_path(*parts: str) -> Path:
     """Ruta a un recurso empaquetado con ``--add-data`` / ``--add-binary``."""
     return bundle_dir().joinpath(*parts)

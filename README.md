@@ -449,6 +449,15 @@ si no, se **elimina** y la fila queda en **Error** con el motivo, lista para **R
 
 No se usa un umbral fijo tipo «5 MB»: rechazaría canciones MP3 o clips cortos válidos.
 
+- **Antes de analizar** se espera al menos 0,5 s y hasta que el tamaño del archivo deje de cambiar
+  (máx. 3 s), por si el post-procesado, el antivirus o un indexador aún lo están escribiendo.
+- **Red de seguridad:** si ffprobe no puede leer un archivo de **más de 1 MB**, no se borra: se
+  conserva como **«Guardado (sin verificar)»** y el log registra «Archivo sin verificar» con la
+  causa. Solo se eliminan los archivos ilegibles pequeños (restos típicos de una descarga rota).
+- ffprobe, el reproductor de **▶ Reproducir** y las notificaciones se lanzan con el entorno
+  original del sistema, no con las bibliotecas empaquetadas del ejecutable (ver *Solución de
+  problemas*).
+
 - **HLS/DASH:** si un segmento falla tras todos los reintentos, la descarga se detiene en lugar de
   omitirlo (`skip_unavailable_fragments = False`): FFmpeg solo une el video con el 100 % de los
   segmentos. Los segmentos ya descargados se conservan y un reintento continúa desde ahí.
@@ -639,6 +648,11 @@ Las pruebas de `tests/test_search.py` muestran cómo probar un proveedor sin red
   mostrar advertencias, sobre todo en `--onefile`. Usa `--onedir` o firma el ejecutable.
 - **Linux, "no se puede abrir el lanzador":** haz clic derecho sobre el icono del Escritorio →
   *Permitir ejecutar* (algunos entornos lo exigen además del `chmod +x`).
+- **Linux: la descarga llega al 100 % y el archivo desaparece** (1.0.0 en distribuciones más
+  nuevas que Ubuntu 22.04, p. ej. 24.04): corregido en la 1.0.1. El ejecutable apunta
+  `LD_LIBRARY_PATH` a sus bibliotecas y el `ffprobe` del sistema las heredaba y no arrancaba
+  (`GLIBCXX_3.4.32 not found`); el validador lo tomaba por un archivo dañado. La CI prueba ahora
+  el binario de Linux también en Ubuntu 24.04 con una descarga real.
 - **«Acceso denegado» (403) en video web:** revisa el *Referer* (debe ser la página del
   reproductor, a veces la del iframe) y que el enlace no haya caducado.
 - **Las descargas de YouTube empiezan a fallar:** actualiza yt-dlp y vuelve a compilar:
